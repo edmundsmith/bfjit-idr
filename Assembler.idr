@@ -174,6 +174,16 @@ rsi = R RSI
 rdi : Val
 rdi = R RDI
 
+bytesToB64 : List Bits8 -> Bits64
+bytesToB64 (msb1::msb2::msb3::msb4::msb5::msb6::msb7::lsb::_) = 
+	((prim__shlB64 (prim__zextB8_B64 msb1) 56) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb2) 48) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb3) 40) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb4) 32) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb5) 24) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb6) 16) `prim__orB64`
+	((prim__shlB64 (prim__zextB8_B64 msb7) 8) `prim__orB64`
+	(prim__zextB8_B64 lsb))))))))
 
 emit : List Bits8 -> X86 ()
 emit bits = 'jit :- update (appendBits bits) --' Sublime doesn't like single apostophes
@@ -200,7 +210,7 @@ add : Val -> Val -> X86 ()
 add (R l) (I r) = do
 	emit [0x48]
 	emit [0x05]
-	imm r
+	imm32 $ prim__truncB64_B32 r
 add (R l) (R r) = do
 	emit [0x48]
 	emit [0x01]
@@ -213,7 +223,7 @@ sub : Val -> Val -> X86 ()
 sub (R l) (I r) = do
 	emit [0x48]
 	emit [0x2D]
-	imm r
+	imm32 $ prim__truncB64_B32 r
 sub (R l) (R r) = do
 	emit [0x48]
 	emit [0x29]
@@ -332,7 +342,7 @@ jz (A l) = do
 	let pos_end = the Bits32 l
 	let pos_diff = pos_end - pos_start - (the Bits32 6)
 	emit [0x0F]
-	emit [0x85]
+	emit [0x84]
 	imm32 pos_diff
 jz _ = raise "Can only jump to addresses"
 

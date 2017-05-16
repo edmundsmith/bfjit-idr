@@ -1,9 +1,15 @@
 module BF
 
-import Util
-import Unlifter
+--import Util
+--import Unlifter
 import Assembler
+import Effects
+import Effect.State
+import Effect.File
+import Effect.StdIO
+import Effect.Exception
 
+%access public export
 
 infixl 9 |>
 infixr 0 <|
@@ -36,6 +42,17 @@ data LLIR = LL_Left
 	| LL_CloseLoop
 	| LL_Input
 	| LL_Output
+
+Eq LLIR where
+	(==) LL_Left LL_Left = True
+	(==) LL_Right LL_Right = True
+	(==) LL_Inc LL_Inc = True
+	(==) LL_Dec LL_Dec = True
+	(==) LL_OpenLoop LL_OpenLoop = True
+	(==) LL_CloseLoop LL_CloseLoop = True
+	(==) LL_Input LL_Input = True
+	(==) LL_Output LL_Output = True
+	(==) _ _ = False
 
 record LLTape where
 	constructor MkLLTape
@@ -79,15 +96,71 @@ parseLLIR str = reverse $ foldl combine [] (unpack str) where
 
 {-
 	rax : cell*
-
+	
 -}
-
-total
-emitterLLIR : List LLIR -> List Bits8
-emitterLLIR list = emitter list (initialJIT 0) where
+ 
+emitterLLIR : Bits64 -> List LLIR -> List Bits8
+emitterLLIR memAddr list = 
+		case runJit (emitter list) of
+			Left err => []
+			Right jit => mach $ record { 
+				mach = (([0x48,0xB8] ++ (b64ToBytes memAddr)) ++ (mach jit)),
+				memoff $= (+10)
+			} jit
+	where
 	emitter : List LLIR -> X86 ()
 	emitter (LL_Left::t) = do
-		sub 
+		sub rax (I 1)
+		emitter t
+	emitter (LL_Right::t) = do
+		add rax (I 1)
+		emitter t
+	emitter (LL_Inc::t) = do
+		emit [0x80,0x00,0x01]	--add byte [rax], 1
+		emitter t
+	emitter (LL_Dec::t) = do
+		emit [0x80,0x28,0x01]	--sub byte [rax], 1
+		emitter t 
+	emitter (LL_Output::t) = do
+		push rax
+		mov rdi (I 1)
+		mov rsi rax
+		mov rdx (I 1)
+		mov rax (I 1)
+		syscall
+		pop rax
+		emitter t
+	emitter (LL_Input::t) = do
+		push rax
+		mov rdi (I 0)
+		mov rsi rax
+		mov rdx (I 1)
+		mov rax (I 0)
+		syscall
+		pop rax
+		emitter t
+	emitter (LL_OpenLoop::t) = do
+		let inner = runJit $ emitter t
+		case inner of
+			Left err => raise err
+			Right ijit => do
+				emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
+				emit [0x0F]
+				emit [0x84]
+				imm32 $ (prim__zextInt_B32 $ toIntNat $ length $ mach ijit)
+				emit $ mach ijit
+				case tail' (dropWhile (/= LL_CloseLoop) t) of
+					Just tail => emitter tail
+					Nothing => pure ()
+	emitter (LL_CloseLoop::t) = do
+		emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
+		-- (-3) is the offset to make up for the 9 unincluded openloop prolog bytes
+		-- jnz
+		emit [0x0F]
+		emit [0x85]
+		imm32 $ prim__subB32 (the Bits32 (-4)) $ prim__zextInt_B32 $ toIntNat $ length $ mach !('jit :- get) --'
+		--jnz $ A $ ((the Bits32 (-3)) +) $ prim__zextInt_B32 $ negate $ toIntNat $ length $ mach !('jit :- get) --'
+	emitter [] = ret
 
 {-record LLIR_Interpreter (m:Type -> Type) : Type* where
 	constructor MkLLInterpreter

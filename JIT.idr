@@ -9,8 +9,11 @@ import Data.Bits
 
 import Assembler
 import CFFI
+import BF
 
 %include C "sys/mman.h"
+%include C "stdlib.h"
+%include C "stdio.h"
 
 %access public export
 
@@ -100,6 +103,12 @@ factorial n = do
 	jnz loop
 	ret
 
+record hacks where
+	constructor irrelevant
+
+	union_val : Bits64
+	clos_type : Bits64
+
 jmain : IO ()
 jmain = do
 	let jit = runJit (factorial $ prim__zextInt_B64 $ prim__fromStrInt $ trim $ !getLine)
@@ -109,3 +118,23 @@ jmain = do
 			executeJit (mach comp)
 			pure ()
 		Left err => putStrLn err
+	bf <- getLine
+	(ARRAY 100 I8) ~~> \ptr => do
+		let ptrRaw = !(foreign FFI_C "labs" (Ptr -> IO Bits64) ptr)
+		foreign FFI_C "printf" (String -> Ptr -> IO ()) "%p\n" ptr
+		--let ptrRaw = the Bits64 $ really_believe_me ptr
+		putStrLn $ show ptrRaw
+		let ptrRaw = bytesToB64 $ reverse $ b64ToBytes ptrRaw
+		{-putStrLn $ show !(prim_peek64 ptr 0)
+		putStrLn $ show !(prim_peek64 ptr 8)
+		putStrLn $ show !(prim_peek64 ptr 16)
+		putStrLn $ show !(prim_peek64 ptr 24)-}
+		executeJit $ emitterLLIR ptrRaw $ parseLLIR $ bf
+		putStr $ show !(prim_peek64 ptr 0)
+		putStr ","
+		putStr $ show !(prim_peek64 ptr 8)
+		putStr ","
+		putStr $ show !(prim_peek64 ptr 16)
+		putStr ","
+		putStr $ show !(prim_peek64 ptr 24)
+	putStrLn "Done!"
