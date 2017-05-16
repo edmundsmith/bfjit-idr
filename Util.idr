@@ -5,6 +5,12 @@ import Data.Vect
 %language UniquenessTypes
 %access public export
 
+infix 1 .|.
+infix 2 .&.
+
+(.|.) = or'
+(.&.) = and'
+
 followedBy : (a->b) -> (b->c) -> a -> c
 followedBy = flip (.)
 

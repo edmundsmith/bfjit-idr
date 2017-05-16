@@ -5,50 +5,58 @@ import Effect.State
 import Effect.File
 import Effect.StdIO
 import Effect.Exception
+import Data.Bits
 
 import Assembler
 import CFFI
 
-%include c "run.h"
-%link c "run.o"
+--%include c "run.h"
+--%link c "run.o"
+%include C "sys/mman.h"
 
 %access public export
 
-PROT_EXEC : IO Int
-PROT_EXEC = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_PROT_EXEC" (IO Ptr)))
-PROT_READ : IO Int
-PROT_READ = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_PROT_READ" (IO Ptr)))
-PROT_WRITE : IO Int
-PROT_WRITE = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_PROT_WRITE" (IO Ptr)))
-PROT_NONE : IO Int
-PROT_NONE = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_PROT_NONE" (IO Ptr)))
+infixl 1 .|.
+(.|.) : %static {n:Nat} -> machineTy n -> machineTy n -> machineTy n
+(.|.) = or'
 
-MAP_SHARED : IO Int
-MAP_SHARED = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_MAP_SHARED" (IO Ptr)))
-MAP_PRIVATE : IO Int
-MAP_PRIVATE = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_MAP_PRIVATE" (IO Ptr)))
-MAP_ANONYMOUS : IO Int
-MAP_ANONYMOUS = pure $ prim__truncB32_Int !(peek I32 !(foreign FFI_C "&idr_MAP_ANONYMOUS" (IO Ptr)))
+infixl 2 .&.
+(.&.) : %static {n:Nat} -> machineTy n -> machineTy n -> machineTy n
+(.&.) = and'
 
-mmap : Ptr -> Bits64 -> Int -> Int -> Int -> Bits64 -> IO Ptr
+PROT_EXEC : Bits32
+PROT_EXEC = 0x4
+PROT_WRITE : Bits32
+PROT_WRITE = 0x2
+PROT_READ : Bits32
+PROT_READ = 0x1
+PROT_NONE : Bits32
+PROT_NONE = 0x0
+
+MAP_SHARED : Bits32
+MAP_SHARED = 0x01
+MAP_PRIVATE : Bits32
+MAP_PRIVATE = 0x02
+MAP_ANONYMOUS : Bits32
+MAP_ANONYMOUS = 0x20
+
+
+mmap : Ptr -> Bits64 -> Bits32 -> Bits32 -> Bits32 -> Bits64 -> IO Ptr
 mmap ptr len prot flags fd off = 
-	foreign FFI_C "run_mmap" 
-		(Ptr -> Bits64 -> Int -> Int -> Int -> Bits64 -> IO Ptr)
+	foreign FFI_C "mmap" 
+		(Ptr -> Bits64 -> Bits32 -> Bits32 -> Bits32 -> Bits64 -> IO Ptr)
 		ptr len prot flags fd off
 
 mmap_executable : Composite -> IO Ptr
-mmap_executable t = do
-	putStrLn $ (show !PROT_EXEC) ++ "," ++ (show !PROT_WRITE) ++ "," ++ (show !PROT_READ)
-	r <- (mmap null
+mmap_executable t = mmap null
 			(prim__zextInt_B64 $ sizeOf t)
-			((!PROT_EXEC `prim__orInt` !PROT_WRITE) `prim__orInt` !PROT_READ) 
-			(!MAP_PRIVATE `prim__orInt` !MAP_ANONYMOUS)
-			(-1)
-			0)
-	putStrLn $ show (r == null)
-	pure r
+			(the (machineTy 2) PROT_EXEC .|. PROT_WRITE .|. PROT_READ)
+			(the (machineTy 2) MAP_PRIVATE .|. MAP_ANONYMOUS)
+			(prim__zextInt_B32 (-1))
+			0
+
 munmap : Ptr -> Bits64 -> IO Int
-munmap ptr len = foreign FFI_C "run_munmap" (Ptr -> Bits64 -> IO Int) ptr len
+munmap ptr len = foreign FFI_C "munmap" (Ptr -> Bits64 -> IO Int) ptr len
 
 withMMap : Composite -> (CPtr -> IO a) -> IO a
 withMMap t f = do
@@ -57,51 +65,31 @@ withMMap t f = do
 	munmap m (prim__zextInt_B64 $ sizeOf t) 
 	pure r
 
-external_runner : CPtr -> IO Int
-external_runner ptr = foreign FFI_C "run" (Ptr -> IO Int) ptr
+{-run_fptr : %static {fptr:Type} -> CPtr -> fptr
+run_fptr {fptr} ptr = case fptr of 
+	(b -> c) => the (b->c) $ \x:b => foreign FFI_C "%dynamic" (Ptr -> b -> c) ptr x
+	(a -> b -> c) => \x => run_fptr {fptr=b->c} ptr -}
+run_int_int_ptr : CPtr -> Int -> IO Int
+run_int_int_ptr ptr = foreign FFI_C "%dynamic" (Ptr -> Int -> IO Int) ptr
 
-external_runner_internal : CPtr -> IO Int
-external_runner_internal ptr = foreign FFI_C "%dynamic" (Ptr -> Int -> IO Int) ptr 0
-
-make_exe : CPtr -> IO Int
-make_exe ptr = foreign FFI_C "make_exe" (Ptr -> IO Int) ptr
-
-diver : CPtr -> IO Int
-diver arr = do
-	--x <- foreign FFI_C "%dynamic" (Ptr -> Int -> IO Int) arr 0
-	x <- external_runner_internal arr
-	putStrLn $ "Wow " ++ show x
-	pure x
-
-magic_inner : List Bits8 -> Composite -> CPtr -> IO () -> Int -> IO ()
-magic_inner bits comp cptr io off = io >>= \x => do
-	bits8 <- case (index' (toNat off) bits) of 
-		Just bits8 => pure bits8
-		Nothing => putStrLn "Out of index" >>= \x => (pure (the Bits8 0))
-	poke I8 (field comp (toNat off) cptr) bits8
-	putStr $ show bits8
-	pure ()
-
-marker : CPtr -> IO ()
-marker cptr = putStrLn "Cptr found"
-
-magic : List Bits8 -> Composite -> CPtr -> IO ()
-magic bits arr ptr = do
-	putStrLn $ show $ toIntNat $ length bits
-	foldl (magic_inner bits arr ptr) (pure ()) (enumFromTo 0 (toIntNat $ pred $ Prelude.List.length bits))
-	putStrLn ""
-	--let tr = the (CPtr -> List Bits8) (map (peek I8))
-	--putStrLn $ foldl (\x => \y => x ++ show y) "" (tr ptr)
-	--marker arr
-	putStrLn $ show ! (make_exe ptr)
-	diver ptr
+setAndExecuteBits : List Bits8 -> Composite -> CPtr -> IO ()
+setAndExecuteBits bits arr ptr = do
+	for_ [0 .. pred $ Prelude.List.length bits] $ \i => do
+		bits8 <- case (index' i bits) of
+			Just bits8 => pure bits8
+			Nothing => putStrLn ("Out of index: " ++ show i) >>= \x => pure (the Bits8 0)
+		poke I8 ((arr#i) ptr) bits8
+		putStr $ show bits8
+		pure ()
+	putStr "\nWow! "
+	putStrLn $ show !(run_int_int_ptr ptr 0)
 	pure ()
 
 executeJit : List Bits8 -> IO ()
 executeJit bits = do
 	let lbits = toIntNat $ length bits + 1
 	let arrTy = the Composite (ARRAY lbits (T I8))
-	withMMap arrTy (magic bits arrTy)
+	withMMap arrTy (setAndExecuteBits bits arrTy)
 
 factorial : Bits64 -> X86 ()
 factorial n = do
@@ -116,7 +104,7 @@ factorial n = do
 
 jmain : IO ()
 jmain = do
-	let jit = runJit (factorial 10)
+	let jit = runJit (factorial $ prim__zextInt_B64 $ prim__fromStrInt $ trim $ !getLine)
 	putStrLn $ show jit
 	case jit of
 		Right comp => do 
