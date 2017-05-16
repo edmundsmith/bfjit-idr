@@ -10,8 +10,6 @@ import Data.Bits
 import Assembler
 import CFFI
 
---%include c "run.h"
---%link c "run.o"
 %include C "sys/mman.h"
 
 %access public export
