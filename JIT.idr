@@ -103,12 +103,6 @@ factorial n = do
 	jnz loop
 	ret
 
-record hacks where
-	constructor irrelevant
-
-	union_val : Bits64
-	clos_type : Bits64
-
 jmain : IO ()
 jmain = do
 	let jit = runJit (factorial $ prim__zextInt_B64 $ prim__fromStrInt $ trim $ !getLine)
@@ -119,7 +113,7 @@ jmain = do
 			pure ()
 		Left err => putStrLn err
 	bf <- getLine
-	(ARRAY 100 I8) ~~> \ptr => do
+	(ARRAY 4000 I8) ~~> \ptr => do
 		let ptrRaw = !(foreign FFI_C "labs" (Ptr -> IO Bits64) ptr)
 		foreign FFI_C "printf" (String -> Ptr -> IO ()) "%p\n" ptr
 		--let ptrRaw = the Bits64 $ really_believe_me ptr
