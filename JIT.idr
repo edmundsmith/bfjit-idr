@@ -12,6 +12,8 @@ import Assembler
 import CFFI
 import BF
 
+import Debug.Trace
+
 %include C "sys/mman.h"
 %include C "stdlib.h"
 %include C "stdio.h"
@@ -88,36 +90,17 @@ run_int_int_ptr ptr = foreign FFI_C "%dynamic" (Ptr -> Int -> IO Int) ptr
 setAndExecuteBits : List Bits8 -> Composite -> CPtr -> IO ()
 setAndExecuteBits bits arr ptr = do
 		putStrLn "Setting bytes"
-		let len = the Nat $ pred $ Prelude.List.length bits
-		{-for_ [0 .. len] $ \i => do
-			bits8 <- case (index' i bits) of
-				Just bits8 => pure bits8
-				Nothing => putStrLn ("Out of index: " ++ show i) >>= \x => pure (the Bits8 0)
-			poke I8 ((arr#i) ptr) bits8
-			putStr $ show bits8
-			pure ()-}
-		loopFrom' Z bits
+		loopFrom' 0 bits ptr
 		putStrLn "\nWow!"
 		putStrLn $ show !(run_int_int_ptr ptr 0)
 		pure ()
 
 	where
-	loopFrom' : Nat -> List Bits8 -> IO ()
-	loopFrom' n (h::t) = do
-		poke I8 ((arr#n) ptr) h
-		--putStr $ show h
-		loopFrom' (S n) t
-	loopFrom' n [] = pure ()
-
-	{-loop : Nat -> List Bits8 -> IO ()
-	loop Z _ = pure ()
-	loop (S next) bits = do
-		(bits8, bitsLeft) <- case bits of
-			(bits8::bitsLeft) => pure (bits8, bitsLeft)
-			[] => putStrLn ("Out of index: " ++ show (S next)) >>= \x => pure ((the Bits8 0), the (List Bits8) [])
-		poke I8 ((arr#i) ptr) bits8
-		putStr $ show bits8	
-		loop next bitsLeft-}
+	loopFrom' : Int -> List Bits8 -> CPtr -> IO ()
+	loopFrom' n (h::t) (CPt p o) = do
+		poke I8 (CPt p (o + (sizeOf (fieldType arr Z) * n))) h
+		loopFrom' (n+1) t (CPt p o)
+	loopFrom' n [] ptr = pure ()
 
 executeJit : List Bits8 -> IO ()
 executeJit bits = do
