@@ -3,4 +3,4 @@ module Main
 import JIT
 
 main : IO ()
-main = jmain 
+main = io_emain 

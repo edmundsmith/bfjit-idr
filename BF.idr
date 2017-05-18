@@ -56,6 +56,16 @@ Eq LLIR where
 	(==) LL_Output LL_Output = True
 	(==) _ _ = False
 
+Show LLIR where
+	show LL_Left = "LL_Left"
+	show LL_Right = "LL_Right"
+	show LL_Inc = "LL_Inc"
+	show LL_Dec = "LL_Dec"
+	show LL_OpenLoop = "LL_OpenLoop"
+	show LL_CloseLoop = "LL_CloseLoop"
+	show LL_Input = "LL_Input"
+	show LL_Output = "LL_Output"
+
 record LLTape where
 	constructor MkLLTape
 	llTape : List Bits8
@@ -105,7 +115,7 @@ emitterLLIR : Bits64 -> List LLIR -> List Bits8
 emitterLLIR memAddr list = 
 		case runJit (emitter list) of
 			Left err => []
-			Right jit => mach $ record { 
+			Right jit => trace (show $ length $ mach jit) mach $ record { 
 				mach = (([0x48,0xB8] ++ (b64ToBytes memAddr)) ++ (mach jit)),
 				memoff $= (+10)
 			} jit
@@ -117,19 +127,19 @@ emitterLLIR memAddr list =
 	takeBalanced (h::t) = takeBalanced t
 	--TODO: Thread explicit not-consumed LLIR list through
 	emitter : List LLIR -> X86 ()
-	emitter (LL_Left::t) = trace "LL_Left " $ do
+	emitter (LL_Left::t) = do
 		sub rax (I 1)
 		emitter t
-	emitter (LL_Right::t) = trace "LL_Right " $ do
+	emitter (LL_Right::t) = do
 		add rax (I 1)
 		emitter t
-	emitter (LL_Inc::t) = trace "LL_Inc " $ do
+	emitter (LL_Inc::t) = do
 		emit [0x80,0x00,0x01]	--add byte [rax], 1
 		emitter t
-	emitter (LL_Dec::t) = trace "LL_Dec " $ do
+	emitter (LL_Dec::t) = do
 		emit [0x80,0x28,0x01]	--sub byte [rax], 1
 		emitter t 
-	emitter (LL_Output::t) = trace "LL_Output " $ do
+	emitter (LL_Output::t) = do
 		push rax
 		mov rdi (I 1)
 		mov rsi rax
@@ -138,7 +148,7 @@ emitterLLIR memAddr list =
 		syscall
 		pop rax
 		emitter t
-	emitter (LL_Input::t) = trace "LL_Input " $ do
+	emitter (LL_Input::t) = do
 		push rax
 		mov rdi (I 0)
 		mov rsi rax
@@ -148,8 +158,8 @@ emitterLLIR memAddr list =
 		pop rax
 		emitter t
 	emitter (LL_OpenLoop::t) = do
-		let inner = runJit $ emitter $ trace "LL_OpenLoop" t
-		trace "Dunjit" $ case inner of
+		let inner = runJit $ emitter t
+		case inner of
 			Left err => raise err
 			Right ijit => do
 				emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
@@ -157,10 +167,11 @@ emitterLLIR memAddr list =
 				emit [0x84]
 				imm32 $ (prim__zextInt_B32 $ toIntNat $ length $ mach ijit)
 				emit $ mach ijit
-				case takeBalanced t of
+				let balanced = takeBalanced t--(trace ("Balancing " ++ (show t)) t)
+				case {-trace ("Finished with " ++ show balanced)-} balanced of
 					[] => ret
 					tail => emitter tail
-	emitter (LL_CloseLoop::t) = trace "LL_CloseLoop " $ do
+	emitter (LL_CloseLoop::t) = do
 		emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
 		-- (-3) is the offset to make up for the 9 unincluded openloop prolog bytes
 		-- jnz
@@ -168,7 +179,7 @@ emitterLLIR memAddr list =
 		emit [0x85]
 		imm32 $ prim__subB32 (the Bits32 (-4)) $ prim__zextInt_B32 $ toIntNat $ length $ mach !('jit :- get) --'
 		--jnz $ A $ ((the Bits32 (-3)) +) $ prim__zextInt_B32 $ negate $ toIntNat $ length $ mach !('jit :- get) --'
-	emitter [] = trace "Done " $ ret
+	emitter [] = ret
 
 {-record LLIR_Interpreter (m:Type -> Type) : Type* where
 	constructor MkLLInterpreter

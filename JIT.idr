@@ -4,6 +4,7 @@ import Effects
 import Effect.State
 import Effect.File
 import Effect.StdIO
+import Effect.System
 import Effect.Exception
 import Data.Bits
 
@@ -25,6 +26,18 @@ infixl 2 .&.
 (.&.) : %static {n:Nat} -> machineTy n -> machineTy n -> machineTy n
 (.&.) = and'
 
+data IOEff : Effect where
+	PerformIO : IO () -> sig IOEff ()
+
+Handler IOEff IO where
+	handle ctx (PerformIO io) k = do io; k () ()
+
+IOEFF : EFFECT
+IOEFF = MkEff () IOEff
+
+performIO : IO () -> Effects.SimpleEff.Eff () [IOEFF]
+performIO io = call $ PerformIO io
+
 PROT_EXEC : Bits32
 PROT_EXEC = 0x4
 PROT_WRITE : Bits32
@@ -40,7 +53,6 @@ MAP_PRIVATE : Bits32
 MAP_PRIVATE = 0x02
 MAP_ANONYMOUS : Bits32
 MAP_ANONYMOUS = 0x20
-
 
 mmap : Ptr -> Bits64 -> Bits32 -> Bits32 -> Bits32 -> Bits64 -> IO Ptr
 mmap ptr len prot flags fd off = 
@@ -75,16 +87,37 @@ run_int_int_ptr ptr = foreign FFI_C "%dynamic" (Ptr -> Int -> IO Int) ptr
 
 setAndExecuteBits : List Bits8 -> Composite -> CPtr -> IO ()
 setAndExecuteBits bits arr ptr = do
-	for_ [0 .. pred $ Prelude.List.length bits] $ \i => do
-		bits8 <- case (index' i bits) of
-			Just bits8 => pure bits8
-			Nothing => putStrLn ("Out of index: " ++ show i) >>= \x => pure (the Bits8 0)
-		poke I8 ((arr#i) ptr) bits8
-		putStr $ show bits8
+		putStrLn "Setting bytes"
+		let len = the Nat $ pred $ Prelude.List.length bits
+		{-for_ [0 .. len] $ \i => do
+			bits8 <- case (index' i bits) of
+				Just bits8 => pure bits8
+				Nothing => putStrLn ("Out of index: " ++ show i) >>= \x => pure (the Bits8 0)
+			poke I8 ((arr#i) ptr) bits8
+			putStr $ show bits8
+			pure ()-}
+		loopFrom' Z bits
+		putStrLn "\nWow!"
+		putStrLn $ show !(run_int_int_ptr ptr 0)
 		pure ()
-	putStr "\nWow! "
-	putStrLn $ show !(run_int_int_ptr ptr 0)
-	pure ()
+
+	where
+	loopFrom' : Nat -> List Bits8 -> IO ()
+	loopFrom' n (h::t) = do
+		poke I8 ((arr#n) ptr) h
+		--putStr $ show h
+		loopFrom' (S n) t
+	loopFrom' n [] = pure ()
+
+	{-loop : Nat -> List Bits8 -> IO ()
+	loop Z _ = pure ()
+	loop (S next) bits = do
+		(bits8, bitsLeft) <- case bits of
+			(bits8::bitsLeft) => pure (bits8, bitsLeft)
+			[] => putStrLn ("Out of index: " ++ show (S next)) >>= \x => pure ((the Bits8 0), the (List Bits8) [])
+		poke I8 ((arr#i) ptr) bits8
+		putStr $ show bits8	
+		loop next bitsLeft-}
 
 executeJit : List Bits8 -> IO ()
 executeJit bits = do
@@ -103,6 +136,47 @@ factorial n = do
 	jnz loop
 	ret
 
+emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), IOEFF]
+emain = 
+	case !getArgs of
+		[] => Effect.StdIO.putStrLn "Impossible: empty arg list"
+		(prog::args) => f args {-with Effects 
+			for_ args $ the (String -> Eff () [STDIO, FILE ()]) $ 
+				\arg => 
+					Effect.StdIO.putStrLn $ "Running " ++ arg
+					Result fileContents <- readFile arg
+						| err => Effect.StdIO.putStrLn ("Unexpected: " ++ arg ++ (show err))
+					(ARRAY 4000 I8) ~~> \tape => do
+						let tapeLoc = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
+						executeJit $ emitterLLIR tapeLoc $ parseLLIR fileContents-}
+			
+				{-Result fileContents <- readFile arg 
+					| err => Effect.StdIO.putStrLn ("Unexpected: " ++ arg ++ (show err))
+				(ARRAY 4000 I8) ~~> \tape => do
+					let tapeLoc = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
+					executeJit $ emitterLLIR tapeLoc $ parseLLIR bf-}
+	--putStrLn ""
+	where 
+		f : List String -> Eff () [STDIO, SYSTEM, FILE (), IOEFF]
+		f [] = pure ()
+		f (arg::t) = do 
+			Effect.StdIO.putStrLn $ "Running " ++ arg
+			Result fileContents <- lift $ readFile arg
+					| err => lift (Effect.StdIO.putStrLn ("Unexpected error with: " ++ arg))
+			performIO $ (ARRAY 4000 I8) ~~> \tape => do
+				putStrLn "Running on array"
+				let tapeLoc = bytesToB64 $ reverse $ b64ToBytes $ !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
+				putStrLn $ show tapeLoc
+				let llir = parseLLIR fileContents
+				let readyJit = emitterLLIR tapeLoc llir
+				putStrLn "Jit prepared!"
+				executeJit readyJit
+				--executeJit $ emitterLLIR tapeLoc $ parseLLIR fileContents
+			f t
+
+io_emain : IO ()
+io_emain = run emain
+
 jmain : IO ()
 jmain = do
 	let jit = runJit (factorial $ prim__zextInt_B64 $ prim__fromStrInt $ trim $ !getLine)
@@ -113,9 +187,9 @@ jmain = do
 			pure ()
 		Left err => putStrLn err
 	bf <- getLine
-	(ARRAY 4000 I8) ~~> \ptr => do
-		let ptrRaw = !(foreign FFI_C "labs" (Ptr -> IO Bits64) ptr)
-		foreign FFI_C "printf" (String -> Ptr -> IO ()) "%p\n" ptr
+	(ARRAY 4000 I8) ~~> \tape => do
+		let ptrRaw = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
+		foreign FFI_C "printf" (String -> Ptr -> IO ()) "%p\n" tape
 		--let ptrRaw = the Bits64 $ really_believe_me ptr
 		putStrLn $ show ptrRaw
 		let ptrRaw = bytesToB64 $ reverse $ b64ToBytes ptrRaw
@@ -124,11 +198,12 @@ jmain = do
 		putStrLn $ show !(prim_peek64 ptr 16)
 		putStrLn $ show !(prim_peek64 ptr 24)-}
 		executeJit $ emitterLLIR ptrRaw $ parseLLIR $ bf
-		putStr $ show !(prim_peek64 ptr 0)
+		putStr $ show !(prim_peek64 tape 0)
 		putStr ","
-		putStr $ show !(prim_peek64 ptr 8)
+		putStr $ show !(prim_peek64 tape 8)
 		putStr ","
-		putStr $ show !(prim_peek64 ptr 16)
+		putStr $ show !(prim_peek64 tape 16)
 		putStr ","
-		putStr $ show !(prim_peek64 ptr 24)
+		putStr $ show !(prim_peek64 tape 24)
+
 	putStrLn "Done!"
