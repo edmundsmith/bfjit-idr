@@ -66,17 +66,6 @@ Show LLIR where
 	show LL_Input = "LL_Input"
 	show LL_Output = "LL_Output"
 
-record LLTape where
-	constructor MkLLTape
-	llTape : List Bits8
-
-record LLProg where
-	constructor MkLLProg
-	llProg : List LLIR
-
-record LLInterpreter where
-	constructor MkInterpreter
-
 total
 isCharBF : 
 Char -> Bool
@@ -98,6 +87,56 @@ charToLLIR ',' = LL_Input
 charToLLIR '.' = LL_Output
 charToLLIR _ {prf=prf} = LL_Output
 
+data MIR : Type where
+	M_Move : Int -> MIR
+	M_Add : Bits8 -> MIR
+	M_Input : MIR
+	M_Output: MIR
+	M_Loop : List MIR -> MIR
+	M_FixedLoop : List MIR -> MIR
+	M_Set : Bits8 -> MIR
+	M_MulAddOff : Bits8 -> Int -> MIR
+
+Eq MIR where
+	(==) (M_Move m) (M_Move n) = m == n
+	(==) (M_Add m) (M_Add n) = m == n
+	(==) (M_Input) (M_Input) = True
+	(==) (M_Output) (M_Output) = True
+	(==) (M_Loop l1) (M_Loop l2) = assert_total $ l1 == l2
+	(==) (M_FixedLoop l1) (M_FixedLoop l2) = assert_total $ l1 == l2
+	(==) (M_Set m) (M_Set n) = m == n
+	(==) (M_MulAddOff mul1 off1) (M_MulAddOff mul2 off2) = mul1 == mul2 && off1 == off2
+	(==) _ _ = False
+
+Show MIR where
+	show (M_Move m) = "M_Move " ++ show m
+	show (M_Add m) = "M_Add " ++ show m
+	show (M_Input) = "M_Input"
+	show (M_Output) = "M_Output"
+	show (M_Loop l1) = "M_Loop " ++ show l1
+	show (M_FixedLoop l1) = "M_FixedLoop " ++ show l1
+	show (M_Set m) = "M_Set " ++ show m
+	show (M_MulAddOff mul1 off1) = "M_MulAddOff " ++ show mul1 ++ " " ++ show off1
+
+tapeOff : MIR -> Maybe Int
+tapeOff (M_Add _) = Just 0
+tapeOff (M_Input) = Just 0
+tapeOff (M_Output) = Just 0
+tapeOff (M_FixedLoop _) = Just 0
+tapeOff (M_Set _) = Just 0
+tapeOff (M_MulAddOff _ _) = Just 0
+tapeOff (M_Move m) = Just m
+tapeOff (M_Loop l) = case foldl (liftA2 (+)) (Just 0) (map tapeOff l) of
+	Just 0 => Just 0
+	_ => Nothing
+
+total
+takeBalanced : List LLIR -> List LLIR
+takeBalanced [] = []
+takeBalanced (LL_CloseLoop::t) = t
+takeBalanced (LL_OpenLoop::t) = assert_total $ takeBalanced $ takeBalanced t
+takeBalanced (h::t) = takeBalanced t
+
 total
 parseLLIR : String -> List LLIR
 parseLLIR str = reverse $ foldl combine [] (unpack str) where
@@ -105,6 +144,18 @@ parseLLIR str = reverse $ foldl combine [] (unpack str) where
 	combine list c = case decEq (isCharBF c) True of
 		Yes prf => charToLLIR c :: list
 		No contra => list
+
+total
+elevateLLIR : List LLIR -> List MIR
+elevateLLIR [] = []
+elevateLLIR (LL_Left::tail) = (M_Move (-1)) :: (elevateLLIR tail)
+elevateLLIR (LL_Right::tail) = (M_Move 1) :: (elevateLLIR tail)
+elevateLLIR (LL_Inc::tail) = (M_Add 1) :: (elevateLLIR tail)
+elevateLLIR (LL_Dec::tail) = (M_Add (0xff)) :: (elevateLLIR tail)
+elevateLLIR (LL_OpenLoop::tail) = assert_total $ (M_Loop (elevateLLIR tail)) :: (elevateLLIR $ takeBalanced tail)
+elevateLLIR (LL_CloseLoop::tail) = []
+elevateLLIR (LL_Input::tail) = (M_Input) :: (elevateLLIR tail)
+elevateLLIR (LL_Output::tail) = (M_Output) :: (elevateLLIR tail)
 
 {-
 	rax : cell*
@@ -120,11 +171,7 @@ emitterLLIR memAddr list =
 				memoff $= (+10)
 			} jit
 	where
-	takeBalanced : List LLIR -> List LLIR
-	takeBalanced [] = []
-	takeBalanced (LL_CloseLoop::t) = t
-	takeBalanced (LL_OpenLoop::t) = takeBalanced $ takeBalanced t
-	takeBalanced (h::t) = takeBalanced t
+	
 	--TODO: Thread explicit not-consumed LLIR list through
 	emitter : List LLIR -> X86 ()
 	emitter (LL_Left::t) = do
@@ -180,6 +227,131 @@ emitterLLIR memAddr list =
 		imm32 $ prim__subB32 (the Bits32 (-4)) $ prim__zextInt_B32 $ toIntNat $ length $ mach !('jit :- get) --'
 		--jnz $ A $ ((the Bits32 (-3)) +) $ prim__zextInt_B32 $ negate $ toIntNat $ length $ mach !('jit :- get) --'
 	emitter [] = ret
+
+record LLTape where
+	constructor MkLLTape
+	llTape : List Bits8
+
+record LLProg where
+	constructor MkLLProg
+	llProg : List LLIR
+
+record LLInterpreter where
+	constructor MkInterpreter
+
+interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
+	optIR : f irLevel -> f irLevel
+
+[mergeImm] Opt List MIR 1 where
+	optIR list = performOpt list where
+		performOpt : List MIR -> List MIR
+		performOpt ((M_Add a)::(M_Add b)::t) = performOpt $ (M_Add (a+b))::t
+		performOpt ((M_Move a)::(M_Move b)::t) = performOpt $ (M_Move (a+b))::t
+		performOpt ((M_Loop l)::(M_Loop _)::t) = performOpt $ (M_Loop l)::t
+		performOpt ((M_FixedLoop l)::(M_Loop _)::t) = performOpt $ (M_FixedLoop l)::t
+		performOpt ((M_Loop l)::(M_FixedLoop _)::t) = performOpt $ (M_Loop l)::t
+		performOpt ((M_FixedLoop l)::(M_FixedLoop _)::t) = performOpt $ (M_FixedLoop l)::t
+		performOpt ((M_Loop [(M_Add 0xff)])::t) = performOpt $ (M_Set 0) :: t
+		performOpt ((M_FixedLoop [(M_Add 0xff)])::t) = performOpt $ (M_Set 0) :: t
+		performOpt ((M_Set _)::(M_Set v)::t) = performOpt $ (M_Set v)::t
+		performOpt ((M_Loop l)::t) = (M_Loop (performOpt l)) :: (performOpt t)
+		performOpt ((M_FixedLoop l)::t) = (M_FixedLoop (performOpt l)) :: (performOpt t)
+		performOpt (h::t) = h :: performOpt t
+		performOpt [] = []
+
+[fixLoops] Opt List MIR 1 where
+	optIR list = performOpt list where
+		performOpt : List MIR -> List MIR
+		performOpt ((M_Loop l)::t) = case tapeOff (M_Loop l) of
+			Just 0 => (M_FixedLoop (performOpt l)) :: (performOpt t)
+			Just n => (M_FixedLoop ((performOpt l) ++ [M_Move (-n)])) :: (performOpt t)
+			Nothing => (M_Loop (performOpt l)) :: (performOpt t)
+		performOpt (h::t) = h :: (performOpt t)
+		performOpt [] = []
+
+emitterMIR : Bits64 -> List MIR -> List Bits8
+emitterMIR memAddr list = 
+		case runJit (emitter list) of
+			Left err => []
+			Right jit => trace (show $ length $ mach jit) mach $ record { 
+				mach = (([0x48,0xB8] ++ (b64ToBytes memAddr)) ++ (mach jit) ++ [0xC3]),
+				memoff $= (+10)
+			} jit
+	where
+	
+	emitter : List MIR -> X86 ()
+	emitter ((M_Move n)::t) = do
+		add rax (I (prim__zextInt_B64 n))
+		emitter t
+	emitter ((M_Add n)::t) = do
+		emit [0x80,0x00,n]	--add byte [rax], n
+		emitter t
+	emitter (M_Output::t) = do
+		push rax
+		mov rdi (I 1)
+		mov rsi rax
+		mov rdx (I 1)
+		mov rax (I 1)
+		syscall
+		pop rax
+		emitter t
+	emitter (M_Input::t) = do
+		push rax
+		mov rdi (I 0)
+		mov rsi rax
+		mov rdx (I 1)
+		mov rax (I 0)
+		syscall
+		pop rax
+		emitter t
+	emitter ((M_Set n)::t) = do
+		emit [0xC6, 0x00, n]
+		emitter t
+	emitter ((M_MulAddOff k off)::t) = do
+		{-mov rdx rax
+		emit [0x48,0x8B,0x82] -- mov rax, [rdx + lit]
+		imm32 $ prim__zextInt_B32 off
+		imul rax (cast Bits32 k)
+		emit [0x48, 0x89, 0x92]-- mov [rdx + lit], rax
+		imm32 $ prim__zextInt_B32 off
+		mov rax rdx-}
+		
+		emit [0x48, 0x6B, 0x90] -- imul rdx, [rax + dword lit1], byte lit2
+		imm32 $ prim__zextInt_B32 off
+		emit [k]
+		emit [0x48,0x89,0x90] -- mov [rax + dword lit1], rdx
+		imm32 $ prim__zextInt_B32 off
+
+	emitter ((M_Loop l)::t) = do
+		let inner = runJit $ emitter l
+		case inner of
+			Left err => raise err
+			Right ijit => do
+				emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
+				emit [0x0F]
+				emit [0x84]
+				imm32 $ (prim__zextInt_B32 $ toIntNat $ length $ mach ijit)
+				prevLbl <- label
+				emit $ mach ijit
+				emit [0x80,0x38,0x00]
+				jnz prevLbl
+		emitter t
+	emitter ((M_FixedLoop l)::t) = do
+		let inner = runJit $ emitter l
+		case inner of
+			Left err => raise err
+			Right ijit => do
+				emit [0x80,0x38,0x00] -- cmp byte [rax], 0x0
+				emit [0x0F]
+				emit [0x84]
+				imm32 $ (prim__zextInt_B32 $ toIntNat $ length $ mach ijit)
+				prevLbl <- label
+				emit $ mach ijit
+				emit [0x80,0x38,0x00]
+				jnz prevLbl
+		emitter t
+	emitter [] = pure()
+
 
 {-record LLIR_Interpreter (m:Type -> Type) : Type* where
 	constructor MkLLInterpreter
