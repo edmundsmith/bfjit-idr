@@ -147,19 +147,19 @@ emain =
 			Result fileContents <- lift $ readFile arg
 					| err => lift (Effect.StdIO.putStrLn ("Unexpected error with: " ++ arg))
 			lift $ performIO $ (ARRAY 4000 I8) ~~> \tape => do
-				putStrLn "Running on array"
 				let tapeLoc = bytesToB64 $ reverse $ b64ToBytes $ !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
 				putStrLn $ show tapeLoc
 				let llir = parseLLIR fileContents
+
 				let mir = elevateLLIR llir
-				--putStrLn $ show mir
 				let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
-				let readyJit = emitterLLIR tapeLoc llir
-				putStrLn "\nLLIR:"
-				for_ readyJit (Prelude.Interactive.putStr . show)
+				let mir = optIR @{removeNops} $ optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+
 				let readyMIRJit = emitterMIR tapeLoc mir
-				putStrLn "\nMIR:"
-				for_ readyMIRJit (Prelude.Interactive.putStr . show)
+				
+				--putStrLn $ show $ optIR @{removeNops} $ optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+				--putStrLn "\nMIR:"
+				--for_ readyMIRJit (Prelude.Interactive.putStr . show)
 				putStrLn "Jit prepared!"
 				executeJit readyMIRJit
 				--executeJit $ emitterLLIR tapeLoc $ parseLLIR fileContents

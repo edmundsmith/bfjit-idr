@@ -1,6 +1,6 @@
 ##Intro
 
-This is a basic JIT compler for BrainF, written purely in Idris. Certain low-level features and activities (mmap, etc.) are provided by using FFI on the C stdlib, which appears to be included by default as a side-effect of Idris' compilation using C as an intermediate language.
+This is a basic JIT compiler for BrainF, written purely in Idris. Certain low-level features and activities (mmap, etc.) are provided by using FFI on the C stdlib, which appears to be included by default as a side-effect of Idris' compilation using C as an intermediate language.
 
 This is also why I call `labs` on a pointer during the lifetime of the program (if this is run in kernel mode (thus with the high bit set), something has gone wrong).
 

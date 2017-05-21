@@ -118,6 +118,7 @@ Show MIR where
 	show (M_Set m) = "M_Set " ++ show m
 	show (M_MulAddOff mul1 off1) = "M_MulAddOff " ++ show mul1 ++ " " ++ show off1
 
+total
 tapeOff : MIR -> Maybe Int
 tapeOff (M_Add _) = Just 0
 tapeOff (M_Input) = Just 0
@@ -126,9 +127,28 @@ tapeOff (M_FixedLoop _) = Just 0
 tapeOff (M_Set _) = Just 0
 tapeOff (M_MulAddOff _ _) = Just 0
 tapeOff (M_Move m) = Just m
-tapeOff (M_Loop l) = case foldl (liftA2 (+)) (Just 0) (map tapeOff l) of
+tapeOff (M_Loop l) = assert_total $ case foldl (liftA2 (+)) (Just 0) (map tapeOff l) of
 	Just 0 => Just 0
 	_ => Nothing
+
+total
+isIO : MIR -> Bool
+isIO M_Input = True
+isIO M_Output = True
+isIO _ = False
+
+total
+isTransitiveIO : MIR -> Bool
+isTransitiveIO (M_Loop l) = assert_total $ any isTransitiveIO l
+isTransitiveIO (M_FixedLoop l) = assert_total $ any isTransitiveIO l
+isTransitiveIO M_Input = True
+isTransitiveIO M_Output = True
+isTransitiveIO _ = False
+
+total
+isOrderBarrier : MIR -> Bool
+isOrderBarrier (M_Loop _) = True
+isOrderBarrier _ = False
 
 total
 takeBalanced : List LLIR -> List LLIR
@@ -214,8 +234,8 @@ emitterLLIR memAddr list =
 				emit [0x84]
 				imm32 $ (prim__zextInt_B32 $ toIntNat $ length $ mach ijit)
 				emit $ mach ijit
-				let balanced = takeBalanced t--(trace ("Balancing " ++ (show t)) t)
-				case {-trace ("Finished with " ++ show balanced)-} balanced of
+				let balanced = takeBalanced t
+				case balanced of
 					[] => ret
 					tail => emitter tail
 	emitter (LL_CloseLoop::t) = do
@@ -267,6 +287,73 @@ interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 			Just n => (M_FixedLoop ((performOpt l) ++ [M_Move (-n)])) :: (performOpt t)
 			Nothing => (M_Loop (performOpt l)) :: (performOpt t)
 		performOpt (h::t) = h :: (performOpt t)
+		performOpt [] = []
+
+[reorderFixedLoops] Opt List MIR 2 where
+	optIR list = (if not (elemBy (\_,x => case x of 
+			M_Loop _ => True
+			M_MulAddOff _ _ => True
+			_ => False) (M_Set 0) list) then performOpt else id) (map innerOpt list)
+	where
+		{-buildList : Int -> List MIR -> (List (List MIR), List (List MIR)) -> List (List MIR)
+		buildList 0 [] (l, r) = [[M_Move (-1 - (toIntNat $ length l))]] ++ reverse l ++ r ++ [[M_Move (-1)]]
+		buildList n [] (l, r) = reverse ([M_Move (-1-n)] :: ((map reverse r)) ++ (reverse (map reverse l)))
+		buildList n ((M_FixedLoop loop)::t) (l, r) = with List
+			buildList n t (l, (M_FixedLoop (performOpt loop)::(the (List MIR) $ fromMaybe [] (head' r)))::fromMaybe [] (tail' r))
+		buildList n ((M_Move 0)::t) (l, r) = buildList n t (l, r)
+		buildList n ((M_Move m)::t) (l, r) = if m > 0
+			then buildList (n+1) ((M_Move (m-1))::t) ((fromMaybe [] (head' r))::l, fromMaybe [] (tail' r))
+			else buildList (n-1) ((M_Move (m+1))::t) (fromMaybe [] (tail' l), (fromMaybe [] (head' l))::r)
+		buildList n (h::t) (l, r) = buildList n t (l, (h::(fromMaybe [] (head' r)))::(fromMaybe [] (tail' r)))
+		-}
+		tagList' : List MIR -> Eff (List (Int, MIR), (Int, MIR), List MIR) [STATE Int]
+		tagList' [] = pure ([], (0, M_Move 0), [])
+		tagList' ((M_Move n)::t) = do
+			update (+n)
+			tagList' t
+		tagList' ((M_Loop l)::t) = do 	--Loops are rewrite barriers (FixedLoops are not)
+			pure ([],(!get, (M_Loop l)),t)
+		tagList' ((M_FixedLoop l)::t) = do 	-- Treat fixed loops as barriers until data dependency is worked out properly
+			pure ([],(!get, (M_FixedLoop l)),t)
+		tagList' (M_Input::t) = do
+			pure ([],(!get, (M_Input)),t)
+		tagList' (M_Output::t) = do
+			pure ([],(!get, (M_Output)),t)
+		tagList' (h::t) = do
+			pos <- get
+			(l, (off, bar), r) <- tagList' t
+			pure ((pos, h)::l, (off,bar), r)
+
+		tagList : List MIR -> (List (Int, MIR), (Int, MIR), List MIR)
+		tagList l = runPure $ tagList' l
+		
+		collectByTag : List (Int, MIR) -> List (Int, MIR)
+		collectByTag l = do
+			let view = map (Prelude.Basics.fst {b=MIR}) l
+			let indices = sort $ nub view
+			foldl (++) [] (map (\x => filter (\t => fst t == x) l) indices)
+
+		resolveBarriers : (List (Int, MIR), (Int, MIR), List MIR) -> List MIR
+		resolveBarriers (fore, (off,barrier), aft) = do
+			let collectedTags = collectByTag fore
+			let resolveFore = concat $ map (\t => [M_Move (fst t), snd t, M_Move (-(fst t))]) collectedTags
+			let resolveAft = case aft of [] => []; _ => (resolveBarriers . tagList) aft
+			resolveFore ++ [M_Move off, barrier, M_Move (-off)]  ++ resolveAft
+
+		performOpt : List MIR -> List MIR
+		performOpt l = resolveBarriers ([], (0, M_Move 0), (M_Move 0)::l)--joinTaggedCodepoints $ collectByTag $ runPure $ tagList l
+		
+		innerOpt : MIR -> MIR
+		innerOpt (M_Loop l) = M_Loop l
+		innerOpt (M_FixedLoop l) = M_FixedLoop $ performOpt l
+		innerOpt x = x
+
+[removeNops] Opt List MIR 1 where
+	optIR list = performOpt list where
+		performOpt : List MIR -> List MIR
+		performOpt ((M_Move 0)::t) = performOpt t
+		performOpt ((M_Add 0)::t) = performOpt t
+		performOpt (h::t) = h :: performOpt t
 		performOpt [] = []
 
 emitterMIR : Bits64 -> List MIR -> List Bits8
@@ -352,6 +439,37 @@ emitterMIR memAddr list =
 		emitter t
 	emitter [] = pure()
 
+total
+llirAsBF : LLIR -> String
+llirAsBF LL_Left = "<"
+llirAsBF LL_Right = ">"
+llirAsBF LL_Inc = "+"
+llirAsBF LL_Dec = "-"
+llirAsBF LL_OpenLoop = "["
+llirAsBF LL_CloseLoop = "]"
+llirAsBF LL_Input = ","
+llirAsBF LL_Output = "."
+
+mutual
+	mirAsBF : MIR -> String
+	mirAsBF (M_Loop l) = assert_total $ "[" ++ toBF l ++ "]"
+	mirAsBF (M_FixedLoop l) = assert_total $ "[" ++ toBF l ++ "]"
+	mirAsBF M_Input = ","
+	mirAsBF M_Output = "."
+	mirAsBF (M_Add x) = let x = if x >= 0x80 then (prim__zextB8_Int x) - 256 else prim__zextB8_Int x in 
+		case compare x 0 of
+			GT => pack $ replicate (toNat x) '+'--with Strings (the String "+") ++ (mirAsBF (M_Add (with Interfaces  x-1)))
+			LT => pack $ replicate (toNat (-x)) '-'
+			EQ => ""
+	mirAsBF (M_Move x) = case compare x 0 of
+		GT => ">" ++ (mirAsBF (M_Move (x-1)))
+		LT => "<" ++ (mirAsBF (M_Move (x+1)))
+		EQ => ""
+	mirAsBF (M_Set x) = assert_total $ "[-]" ++ mirAsBF (M_Add x)
+	mirAsBF op = "ERR translating " ++ show op
+
+	toBF : List MIR -> String
+	toBF l = concat $ map mirAsBF l
 
 {-record LLIR_Interpreter (m:Type -> Type) : Type* where
 	constructor MkLLInterpreter
