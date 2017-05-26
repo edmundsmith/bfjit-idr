@@ -214,7 +214,7 @@ add (R l) (I r) = do
 add (R l) (R r) = do
 	emit [0x48]
 	emit [0x01]
-	emit [(0xc0 `orBits8` (shiftLeft' {n=1} (index r) 3)) `orBits8` (index l)]
+	emit [(0xc0 `orBits8` (shiftLeft' {n=8} (index r) 3)) `orBits8` (index l)]
 add l r = do 
 	raise {b=()} $ "Cannot add " ++ show l ++ " to " ++ show r
 	pure ()
@@ -227,7 +227,7 @@ sub (R l) (I r) = do
 sub (R l) (R r) = do
 	emit [0x48]
 	emit [0x29]
-	emit [(0xc0 `orBits8` (shiftLeft' {n=1} (index r) 3)) `orBits8` (index l)]
+	emit [(0xc0 `orBits8` (shiftLeft' {n=8} (index r) 3)) `orBits8` (index l)]
 sub l r = do
 	raise {b=()} $ "Cannot sub " ++ show r ++ " from " ++ show l
 	pure ()
@@ -270,7 +270,7 @@ imul (R l) (R r) = do
 	emit [0x48]
 	emit [0x0F]
 	emit [0xAF]
-	emit [(0xC0 `orBits8` (shiftLeft' {n=1} (index r) 3)) `orBits8` (index l) ]
+	emit [(0xC0 `orBits8` (shiftLeft' {n=8} (index r) 3)) `orBits8` (index l) ]
 imul l r = raise {b=()} $ "Cannot imul " ++ show l ++ " by " ++ show r
 
 mov : Val -> Val -> X86 ()
@@ -287,7 +287,7 @@ mov (R dst) (A src) = do
 mov (R dst) (R src) = do
 	emit [0x48]
 	emit [0x89]
-	emit [(0xC0 `orBits8` (shiftLeft' {n=1} (index src) 3)) `orBits8` (index dst) ]
+	emit [(0xC0 `orBits8` (shiftLeft' {n=8} (index src) 3)) `orBits8` (index dst) ]
 mov (A dst) (I src) = do
 	emit [0xC7]
 	emit [0x04]
