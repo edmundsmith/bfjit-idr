@@ -119,82 +119,39 @@ factorial n = do
 	jnz loop
 	ret
 
+efor_ : List a -> (a -> Eff b effList) -> Eff () effList
+efor_ (h::t) f = (f h) >>= \_ => (efor_ t f)
+efor_ [] _ = pure ()
+
+
 emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), IOEFF]
 emain = 
 	case !getArgs of
 		[] => Effect.StdIO.putStrLn "Impossible: empty arg list"
-		(prog::args) => f args {-with Effects 
-			for_ args $ the (String -> Eff () [STDIO, FILE ()]) $ 
-				\arg => 
-					Effect.StdIO.putStrLn $ "Running " ++ arg
-					Result fileContents <- readFile arg
-						| err => Effect.StdIO.putStrLn ("Unexpected: " ++ arg ++ (show err))
-					(ARRAY 4000 I8) ~~> \tape => do
-						let tapeLoc = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
-						executeJit $ emitterLLIR tapeLoc $ parseLLIR fileContents-}
-			
-				{-Result fileContents <- readFile arg 
-					| err => Effect.StdIO.putStrLn ("Unexpected: " ++ arg ++ (show err))
-				(ARRAY 4000 I8) ~~> \tape => do
-					let tapeLoc = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
-					executeJit $ emitterLLIR tapeLoc $ parseLLIR bf-}
-	--putStrLn ""
-	where 
-		f : List String -> Eff () [STDIO, SYSTEM, FILE (), IOEFF]
-		f [] = pure ()
-		f (arg::t) = do 
-			Effect.StdIO.putStrLn $ "Running " ++ arg
-			Result fileContents <- lift $ readFile arg
-					| err => lift (Effect.StdIO.putStrLn ("Unexpected error with: " ++ arg))
-			lift $ performIO $ (ARRAY 4000 I8) ~~> \tape => do
-				let tapeLoc = bytesToB64 $ reverse $ b64ToBytes $ !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
-				putStrLn $ show tapeLoc
-				let llir = parseLLIR fileContents
+		(prog::args) => do
+			efor_ {b=()} args $ \arg => do
+				putStrLn $ "Running " ++ arg
+				Result fileContents <- lift $ readFile arg
+						| err => putStrLn ("Unexpected error with: " ++ arg)
+				lift $ performIO $ (ARRAY 4000 I8) ~~> \tape => do
+					let tapeLoc = bytesToB64 $ reverse $ b64ToBytes $ !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
+					putStrLn $ show tapeLoc
+					let llir = parseLLIR fileContents
 
-				let mir = elevateLLIR llir
-				let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
-				let mir = optIR @{removeNops} $ optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+					let mir = elevateLLIR llir
+					let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
+					--let mir = optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+					let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
 
-				let readyMIRJit = emitterMIR tapeLoc mir
-				
-				--putStrLn $ show $ optIR @{removeNops} $ optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
-				--putStrLn "\nMIR:"
-				--for_ readyMIRJit (Prelude.Interactive.putStr . show)
-				putStrLn "Jit prepared!"
-				executeJit readyMIRJit
-				--executeJit $ emitterLLIR tapeLoc $ parseLLIR fileContents
-			f t
+					let readyMIRJit = emitterMIR tapeLoc mir
+
+					putStrLn $ show mir
+					putStrLn "---------"
+									
+					--putStrLn "\nMIR:"
+					--for_ readyMIRJit (Prelude.Interactive.putStr . show)
+					putStrLn "Jit prepared!"
+					executeJit readyMIRJit
 
 io_emain : IO ()
 io_emain = run emain
-
-jmain : IO ()
-jmain = do
-	let jit = runJit (factorial $ prim__zextInt_B64 $ prim__fromStrInt $ trim $ !getLine)
-	putStrLn $ show jit
-	case jit of
-		Right comp => do 
-			executeJit (mach comp)
-			pure ()
-		Left err => putStrLn err
-	bf <- getLine
-	(ARRAY 4000 I8) ~~> \tape => do
-		let ptrRaw = !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
-		foreign FFI_C "printf" (String -> Ptr -> IO ()) "%p\n" tape
-		--let ptrRaw = the Bits64 $ really_believe_me ptr
-		putStrLn $ show ptrRaw
-		let ptrRaw = bytesToB64 $ reverse $ b64ToBytes ptrRaw
-		{-putStrLn $ show !(prim_peek64 ptr 0)
-		putStrLn $ show !(prim_peek64 ptr 8)
-		putStrLn $ show !(prim_peek64 ptr 16)
-		putStrLn $ show !(prim_peek64 ptr 24)-}
-		executeJit $ emitterLLIR ptrRaw $ parseLLIR $ bf
-		putStr $ show !(prim_peek64 tape 0)
-		putStr ","
-		putStr $ show !(prim_peek64 tape 8)
-		putStr ","
-		putStr $ show !(prim_peek64 tape 16)
-		putStr ","
-		putStr $ show !(prim_peek64 tape 24)
-
-	putStrLn "Done!"

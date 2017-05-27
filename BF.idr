@@ -95,7 +95,7 @@ data MIR : Type where
 	M_Loop : List MIR -> MIR
 	M_FixedLoop : List MIR -> MIR
 	M_Set : Bits8 -> MIR
-	M_MulAddOff : Bits8 -> Int -> MIR
+	M_MulAddOff : Bits8 -> Int -> MIR -- mul, off -> *cell += cell[off]*mul
 
 Eq MIR where
 	(==) (M_Move m) (M_Move n) = m == n
@@ -117,6 +117,34 @@ Show MIR where
 	show (M_FixedLoop l1) = "M_FixedLoop " ++ show l1
 	show (M_Set m) = "M_Set " ++ show m
 	show (M_MulAddOff mul1 off1) = "M_MulAddOff " ++ show mul1 ++ " " ++ show off1
+
+data MutationType : Type where
+	ConstructiveMutation : MutationType
+	DestructiveMutation : MutationType
+	NonMutation : MutationType
+
+Show MutationType where
+	show ConstructiveMutation = "constructively"
+	show DestructiveMutation = "destructively"
+	show NonMutation = "immutably"
+
+total
+mutationClass : MIR -> MutationType
+mutationClass (M_Move 0) = NonMutation
+mutationClass (M_Move _) = ConstructiveMutation
+mutationClass (M_Add 0) = NonMutation
+mutationClass (M_Add _) = ConstructiveMutation
+mutationClass (M_Input) = DestructiveMutation
+mutationClass (M_Output) = NonMutation
+mutationClass (M_Loop _) = ConstructiveMutation
+mutationClass (M_FixedLoop _) = ConstructiveMutation
+mutationClass (M_Set _) = DestructiveMutation
+mutationClass (M_MulAddOff _ _) = ConstructiveMutation
+
+total
+isDestructiveMut : MutationType -> Bool
+isDestructiveMut DestructiveMutation = True
+isDestructiveMut _ = False
 
 total
 tapeOff : MIR -> Maybe Int
@@ -289,6 +317,7 @@ interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 		performOpt (h::t) = h :: (performOpt t)
 		performOpt [] = []
 
+-- TODO: Currently broken
 [reorderFixedLoops] Opt List MIR 2 where
 	optIR list = (if not (elemBy (\_,x => case x of 
 			M_Loop _ => True
@@ -351,8 +380,60 @@ interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 [removeNops] Opt List MIR 1 where
 	optIR list = performOpt list where
 		performOpt : List MIR -> List MIR
+		performOpt ((M_Loop l)::t) = (M_Loop (performOpt l))::t
+		performOpt ((M_FixedLoop l)::t) = (M_FixedLoop (performOpt l))::t
 		performOpt ((M_Move 0)::t) = performOpt t
 		performOpt ((M_Add 0)::t) = performOpt t
+		performOpt (h::t) = h :: performOpt t
+		performOpt [] = []
+
+[maddifyLoops] Opt List MIR 1 where
+	optIR list = performOpt list where
+
+		statefulRewrite : List MIR -> Eff (List MIR) [STATE Int]
+		statefulRewrite ((M_Move n)::t) = do
+			update (+n)
+			statefulRewrite t
+		statefulRewrite ((M_Add n)::t) = do
+			pos <- get
+			let h = M_MulAddOff n pos
+			t <- statefulRewrite t
+			if pos == 0
+				then pure $ t ++ [h]
+				else pure $ h :: t
+		statefulRewrite ((M_FixedLoop inner)::t) = do
+			let pos = !get
+			let inner = runPure $ statefulRewrite inner
+			tail <- statefulRewrite t
+			pure $ (M_Move pos)::(M_FixedLoop inner)::(M_Move (-pos)) :: tail
+		statefulRewrite ((M_Set 0)::t) = do
+			tail <- statefulRewrite t
+			pure $ (M_MulAddOff (0xFF) 0)::tail
+		statefulRewrite ((M_MulAddOff mul off)::t) = do
+			pos <- get
+			tail <- statefulRewrite t
+			pure $ (M_Move pos)::(M_MulAddOff mul off)::(M_Move (-pos))::tail
+		statefulRewrite other = pure []
+
+		flattenable : MIR -> Bool
+		flattenable (M_Add _) = True
+		flattenable (M_Move _) = True
+		flattenable (M_FixedLoop l) = all flattenable l
+		flattenable (M_Set 0) = True
+		flattenable (M_MulAddOff mul off) = True
+		flattenable x = False
+
+		canFlatten : List MIR -> Bool
+		canFlatten = all flattenable
+
+		flattened : List MIR -> List MIR
+		flattened l = case canFlatten l of
+			True => runPure (statefulRewrite l)
+			False => [M_FixedLoop l]
+
+		performOpt : List MIR -> List MIR
+		performOpt ((M_FixedLoop fl)::t) = (flattened (performOpt fl)) ++ performOpt t
+		--performOpt ((M_Loop l)::t) = (M_Loop (performOpt l))::(performOpt t)
 		performOpt (h::t) = h :: performOpt t
 		performOpt [] = []
 
@@ -395,20 +476,16 @@ emitterMIR memAddr list =
 		emit [0xC6, 0x00, n]
 		emitter t
 	emitter ((M_MulAddOff k off)::t) = do
-		{-mov rdx rax
-		emit [0x48,0x8B,0x82] -- mov rax, [rdx + lit]
-		imm32 $ prim__zextInt_B32 off
-		imul rax (cast Bits32 k)
-		emit [0x48, 0x89, 0x92]-- mov [rdx + lit], rax
-		imm32 $ prim__zextInt_B32 off
-		mov rax rdx-}
 		
-		emit [0x48, 0x6B, 0x90] -- imul rdx, [rax + dword lit1], byte lit2
+		mov rcx rax
+		emit [0x8A, 0x00] -- mov al, [rax]
+		emit [0xB2, k] -- mov dl, byte lit
+		emit [0xF6, 0xE2] -- mul dl
+		emit [0x00, 0x81] -- add byte [rcx + dword lit], al
 		imm32 $ prim__zextInt_B32 off
-		emit [k]
-		emit [0x48,0x89,0x90] -- mov [rax + dword lit1], rdx
-		imm32 $ prim__zextInt_B32 off
+		mov rax rcx
 
+		emitter t
 	emitter ((M_Loop l)::t) = do
 		let inner = runJit $ emitter l
 		case inner of
