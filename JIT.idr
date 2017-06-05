@@ -6,79 +6,37 @@ import Effect.File
 import Effect.StdIO
 import Effect.System
 import Effect.Exception
+--import Effect.Memory
 import Data.Bits
 
 import Assembler
 import CFFI
 import BF
+import MMap
+import Malloc
 
 import Debug.Trace
 
-%include C "sys/mman.h"
+
 %include C "stdlib.h"
 %include C "stdio.h"
 
 %access public export
 
-infixl 1 .|.
-(.|.) : %static {n:Nat} -> machineTy n -> machineTy n -> machineTy n
-(.|.) = or'
 
-infixl 2 .&.
-(.&.) : %static {n:Nat} -> machineTy n -> machineTy n -> machineTy n
-(.&.) = and'
+data IOEff : Type -> Effect where
+	PerformIO : IO a -> NoResourceEffect.sig (IOEff a) ()
 
-data IOEff : Effect where
-	PerformIO : IO () -> sig IOEff ()
+Handler (IOEff a) IO where
+	handle ctx (PerformIO io) k = do x <- io; k () ()
 
-Handler IOEff IO where
-	handle ctx (PerformIO io) k = do io; k () ()
+IOEFF : Type -> EFFECT
+IOEFF a = MkEff () (IOEff a)
 
-IOEFF : EFFECT
-IOEFF = MkEff () IOEff
-
-performIO : IO () -> Effects.SimpleEff.Eff () [IOEFF]
+performIO : IO a -> Effects.SimpleEff.Eff () [IOEFF a]
 performIO io = call $ PerformIO io
 
-PROT_EXEC : Bits32
-PROT_EXEC = 0x4
-PROT_WRITE : Bits32
-PROT_WRITE = 0x2
-PROT_READ : Bits32
-PROT_READ = 0x1
-PROT_NONE : Bits32
-PROT_NONE = 0x0
 
-MAP_SHARED : Bits32
-MAP_SHARED = 0x01
-MAP_PRIVATE : Bits32
-MAP_PRIVATE = 0x02
-MAP_ANONYMOUS : Bits32
-MAP_ANONYMOUS = 0x20
-
-mmap : Ptr -> Bits64 -> Bits32 -> Bits32 -> Bits32 -> Bits64 -> IO Ptr
-mmap ptr len prot flags fd off = 
-	foreign FFI_C "mmap" 
-		(Ptr -> Bits64 -> Bits32 -> Bits32 -> Bits32 -> Bits64 -> IO Ptr)
-		ptr len prot flags fd off
-
-mmap_executable : Composite -> IO Ptr
-mmap_executable t = mmap null
-			(prim__zextInt_B64 $ sizeOf t)
-			(the (machineTy 2) PROT_EXEC .|. PROT_WRITE .|. PROT_READ)
-			(the (machineTy 2) MAP_PRIVATE .|. MAP_ANONYMOUS)
-			(prim__zextInt_B32 (-1))
-			0
-
-munmap : Ptr -> Bits64 -> IO Int
-munmap ptr len = foreign FFI_C "munmap" (Ptr -> Bits64 -> IO Int) ptr len
-
-withMMap : Composite -> (CPtr -> IO a) -> IO a
-withMMap t f = do
-	m <- mmap_executable t
-	r <- f m
-	munmap m (prim__zextInt_B64 $ sizeOf t) 
-	pure r
 
 {-run_fptr : %static {fptr:Type} -> CPtr -> fptr
 run_fptr {fptr} ptr = case fptr of 
@@ -102,11 +60,16 @@ setAndExecuteBits bits arr ptr = do
 		loopFrom' (n+1) t (CPt p o)
 	loopFrom' n [] ptr = pure ()
 
-executeJit : List Bits8 -> IO ()
+executeJit : List Bits8 -> Eff () [MMAP, IOEFF ()]
 executeJit bits = do
-	let lbits = toIntNat $ length bits + 1
+	let lbits = toIntNat $ S $ length bits
 	let arrTy = the Composite (ARRAY lbits (T I8))
-	withMMap arrTy (setAndExecuteBits bits arrTy)
+	let ptrLen = prim__zextInt_B64 $ sizeOf arrTy
+	--withMMap arrTy (setAndExecuteBits bits arrTy)
+	let ptr = !(mmap_exe arrTy)
+	let res = !(lift $ performIO $ setAndExecuteBits bits arrTy ptr)
+	let ig = !(munmap ptr ptrLen)
+	pure ()
 
 factorial : Bits64 -> X86 ()
 factorial n = do
@@ -123,35 +86,50 @@ efor_ : List a -> (a -> Eff b effList) -> Eff () effList
 efor_ (h::t) f = (f h) >>= \_ => (efor_ t f)
 efor_ [] _ = pure ()
 
-
-emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), IOEFF]
+emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), MMAP, MALLOC (), IOEFF ()]
 emain = 
 	case !getArgs of
-		[] => Effect.StdIO.putStrLn "Impossible: empty arg list"
+		[] => putStrLn "Impossible: empty arg list"
 		(prog::args) => do
-			efor_ {b=()} args $ \arg => do
+			efor_ {b=()} args $ \arg => with Effect.StdIO with Effect.File do --'
 				putStrLn $ "Running " ++ arg
-				Result fileContents <- lift $ readFile arg
-						| err => putStrLn ("Unexpected error with: " ++ arg)
-				lift $ performIO $ (ARRAY 4000 I8) ~~> \tape => do
-					let tapeLoc = bytesToB64 $ reverse $ b64ToBytes $ !(foreign FFI_C "labs" (Ptr -> IO Bits64) tape)
-					putStrLn $ show tapeLoc
-					let llir = parseLLIR fileContents
+				case !(readFile arg) of 
+					Result fileContents => do
+						putStrLn "Read:"
+						putStrLn fileContents
+						
+						tapePtr <- calloc 4000
+						
+						let tapeLoc = bytesToB64 $ reverse $ b64ToBytes (unsafePerformIO $ (foreign FFI_C "labs" (Ptr -> IO Bits64) tapePtr))
 
-					let mir = elevateLLIR llir
-					let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
-					--let mir = optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
-					let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
+						let llir = parseLLIR fileContents
 
-					let readyMIRJit = emitterMIR tapeLoc mir
+						let mir = elevateLLIR llir
+						let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
+						--let mir = optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+						let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
 
-					putStrLn $ show mir
-					putStrLn "---------"
-									
-					--putStrLn "\nMIR:"
-					--for_ readyMIRJit (Prelude.Interactive.putStr . show)
-					putStrLn "Jit prepared!"
-					executeJit readyMIRJit
+						let readyJit = emitterMIR tapeLoc mir
+						let jitLen = toIntNat $ length readyJit
+
+						jitBuf <- mmap_exe (ARRAY jitLen I8)
+
+						efor_ {b=()} (zip [0..jitLen] readyJit) $ \(off, byte) => lift $ performIO $ poke I8 (CPt jitBuf off) byte
+
+						
+
+						putStrLn $ show mir
+						putStrLn "---------"
+										
+						--putStrLn "\nMIR:"
+						--for_ readyMIRJit (Prelude.Interactive.putStr . show)
+						putStrLn "Jit prepared!"
+						performIO $ do _ <- run_int_int_ptr jitBuf 0; pure ()
+
+						_ <- munmap jitBuf (prim__zextInt_B64 jitLen)
+						free tapePtr
+
+					err => putStrLn ("Unexpected error with: " ++ arg)
 
 io_emain : IO ()
 io_emain = run emain
