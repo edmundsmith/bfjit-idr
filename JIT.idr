@@ -86,14 +86,24 @@ efor_ : List a -> (a -> Eff b effList) -> Eff () effList
 efor_ (h::t) f = (f h) >>= \_ => (efor_ t f)
 efor_ [] _ = pure ()
 
+parseOpts : List String -> (List String, List String)
+parseOpts l = parseOpts' (map unpack l) ([],[]) where
+	parseOpts' : List (List Char) -> (List String, List String) -> (List String, List String)
+	parseOpts' (with List ('-'::'-'::h)::t) (l,r) = parseOpts' t ((pack h)::l,r)
+	parseOpts' (h::t) (l,r) = parseOpts' t (l, (pack h)::r)
+	parseOpts' [] res = res
+
 emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), MMAP, MALLOC (), IOEFF ()]
 emain = 
 	case !getArgs of
 		[] => putStrLn "Impossible: empty arg list"
 		(prog::args) => do
-			efor_ {b=()} args $ \arg => with Effect.StdIO with Effect.File do --'
-				putStrLn $ "Running " ++ arg
-				case !(readFile arg) of 
+			let (opts, files) = parseOpts args
+			let irOpt = optPassMIRFor opts
+			putStrLn $ "Opts: " ++ show opts
+			efor_ {b=()} files $ \file => with Effect.StdIO with Effect.File do --'
+				putStrLn $ "Running " ++ file
+				case !(readFile file) of 
 					Result fileContents => do
 						putStrLn "Read:"
 						putStrLn fileContents
@@ -105,31 +115,37 @@ emain =
 						let llir = parseLLIR fileContents
 
 						let mir = elevateLLIR llir
-						let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
+
+						{-let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
 						let mir = optIR @{reorderFixedLoops} mir
 						let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
+						-}
+
+						let mir = (optPassMIRFor opts mir)
 
 						let readyJit = emitterMIR tapeLoc mir
 						let jitLen = toIntNat $ length readyJit
 
 						jitBuf <- mmap_exe (ARRAY jitLen I8)
 
-						efor_ {b=()} (zip [0..jitLen] readyJit) $ \(off, byte) => lift $ performIO $ poke I8 (CPt jitBuf off) byte
+						--putStrLn "Writing bytes"
+						efor_ {b=()} (zip (the (List Int) [0..jitLen]) readyJit) $ \(off, byte) => 
+							lift $ performIO $ poke I8 (CPt jitBuf off) byte
 
 						
 
-						putStrLn $ show mir
-						putStrLn "---------"
+						--putStrLn $ show mir
+						--putStrLn "---------"
 										
 						--putStrLn "\nMIR:"
 						--for_ readyMIRJit (Prelude.Interactive.putStr . show)
-						putStrLn "Jit prepared!"
+						--putStrLn "Jit prepared!"
 						performIO $ do _ <- run_int_int_ptr jitBuf 0; pure ()
 
 						_ <- munmap jitBuf (prim__zextInt_B64 jitLen)
 						free tapePtr
 
-					err => putStrLn ("Unexpected error with: " ++ arg)
+					err => putStrLn ("Unexpected error with: " ++ file)
 
 io_emain : IO ()
 io_emain = run emain

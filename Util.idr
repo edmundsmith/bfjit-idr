@@ -22,7 +22,12 @@ succDistributive n m = do
 	let rightSum = S (m + n)
 	let inner = plusSuccRightSucc m n
 	eqSucc (m + S n) (S (m + n)) (flipEq inner)
-	
+
+interface TapeLike prfLeft prfRight (tape: Type* -> Type*) where
+	tapeLeft : 
+
+data Tape : (a:Type*) -> Type* where
+	TapeCursor : Int -> List a -> a -> List a -> Tape a
 
 data FinList : (n : Nat) -> (a : Type*) -> Type* where
 	FinNil : FinList (S n) a
