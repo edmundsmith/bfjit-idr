@@ -152,7 +152,7 @@ initialJIT : Bits64 -> JITMem
 initialJIT startPtr = MkJIT [] [] 0 startPtr startPtr
 
 appendBits : List Bits8 -> JITMem -> JITMem
-appendBits bits = record {mach $= (++ bits), memoff $= (+ (natToBits {n=3} (length bits))) }
+appendBits bits = record {mach $= ((reverse bits) ++ ), memoff $= (+ (natToBits {n=3} (length bits))) }
 
 orBits8 : Bits8 -> Bits8 -> Bits8
 orBits8 = prim__orB8
@@ -373,5 +373,5 @@ runJit jitState = do
 		pure $ !('jit :- get)) --'
 	case state of
 		Left err => Left err
-		Right jit => Right jit
+		Right jit => Right $ record { mach $= reverse } jit
 
