@@ -97,7 +97,7 @@ emain =
 					Result fileContents => do
 						putStrLn "Read:"
 						putStrLn fileContents
-						
+
 						tapePtr <- calloc 4000
 						
 						let tapeLoc = bytesToB64 $ reverse $ b64ToBytes (unsafePerformIO $ (foreign FFI_C "labs" (Ptr -> IO Bits64) tapePtr))
@@ -106,7 +106,7 @@ emain =
 
 						let mir = elevateLLIR llir
 						let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
-						--let mir = optIR @{mergeImm}  $ optIR @{reorderFixedLoops} mir
+						let mir = optIR @{reorderFixedLoops} mir
 						let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
 
 						let readyJit = emitterMIR tapeLoc mir
