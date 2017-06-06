@@ -290,8 +290,13 @@ record LLInterpreter where
 interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 	optIR : f irLevel -> f irLevel
 
+untilFix : Eq a => (a -> a) -> a -> a
+untilFix f l = do
+	let attempt = f l
+	if attempt == l then attempt else untilFix f attempt
+
 [mergeImm] Opt List MIR 1 where
-	optIR list = performOpt list where
+	optIR list = untilFix performOpt list where
 		performOpt : List MIR -> List MIR
 		performOpt ((M_Add a)::(M_Add b)::t) = performOpt $ (M_Add (a+b))::t
 		performOpt ((M_Move a)::(M_Move b)::t) = performOpt $ (M_Move (a+b))::t
@@ -315,6 +320,16 @@ interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 			Just n => (M_FixedLoop ((performOpt l) ++ [M_Move (-n)])) :: (performOpt t)
 			Nothing => (M_Loop (performOpt l)) :: (performOpt t)
 		performOpt (h::t) = h :: (performOpt t)
+		performOpt [] = []
+
+[removeNops] Opt List MIR 1 where
+	optIR list = performOpt list where
+		performOpt : List MIR -> List MIR
+		performOpt ((M_Loop l)::t) = (M_Loop (performOpt l))::t
+		performOpt ((M_FixedLoop l)::t) = (M_FixedLoop (performOpt l))::t
+		performOpt ((M_Move 0)::t) = performOpt t
+		performOpt ((M_Add 0)::t) = performOpt t
+		performOpt (h::t) = h :: performOpt t
 		performOpt [] = []
 
 -- TODO: Currently broken
@@ -366,26 +381,19 @@ interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 		resolveBarriers (fore, (off,barrier), aft) = do
 			let collectedTags = collectByTag fore
 			let resolveFore = concat $ map (\t => [M_Move (fst t), snd t, M_Move (-(fst t))]) collectedTags
-			let resolveAft = case aft of [] => []; _ => (resolveBarriers . tagList) aft
-			resolveFore ++ [M_Move off, barrier, M_Move (-off)]  ++ resolveAft
+			let resolveAft = case aft of [] => []; _ => (resolveBarriers . tagList) ((M_Move off)::aft)
+			optIR @{removeNops} $ optIR @{mergeImm} $ resolveFore ++ [M_Move off, barrier, M_Move (-off)]  ++ resolveAft
 
-		performOpt : List MIR -> List MIR
-		performOpt l = resolveBarriers ([], (0, M_Move 0), (M_Move 0)::l)--joinTaggedCodepoints $ collectByTag $ runPure $ tagList l
-		
-		innerOpt : MIR -> MIR
-		innerOpt (M_Loop l) = M_Loop l
-		innerOpt (M_FixedLoop l) = M_FixedLoop $ performOpt l
-		innerOpt x = x
 
-[removeNops] Opt List MIR 1 where
-	optIR list = performOpt list where
-		performOpt : List MIR -> List MIR
-		performOpt ((M_Loop l)::t) = (M_Loop (performOpt l))::t
-		performOpt ((M_FixedLoop l)::t) = (M_FixedLoop (performOpt l))::t
-		performOpt ((M_Move 0)::t) = performOpt t
-		performOpt ((M_Add 0)::t) = performOpt t
-		performOpt (h::t) = h :: performOpt t
-		performOpt [] = []
+		mutual
+			innerOpt : MIR -> MIR
+			--innerOpt (M_Loop l) = M_Loop l
+			innerOpt (M_FixedLoop l) = M_FixedLoop $ performOpt l
+			innerOpt x = x
+
+			performOpt : List MIR -> List MIR
+			performOpt l = let l = (map innerOpt l) in resolveBarriers ([], (0, M_Move 0), (M_Move 0)::l)
+
 
 [maddifyLoops] Opt List MIR 1 where
 	optIR list = performOpt list where
