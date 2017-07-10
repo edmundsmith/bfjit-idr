@@ -292,10 +292,18 @@ record LLInterpreter where
 interface Opt (f:Type -> Type) irLevel (aggressiveness : Nat) where
 	optIR : f irLevel -> f irLevel
 
+OptPass : Type -> Type
+OptPass t = List t -> List t
+
 untilFix : Eq a => (a -> a) -> a -> a
 untilFix f l = do
 	let attempt = f l
 	if attempt == l then attempt else untilFix f attempt
+
+onLoops : (List MIR -> List MIR) -> MIR -> MIR
+onLoops f (M_FixedLoop l) = M_FixedLoop $ f $ map (onLoops f) l
+onLoops f (M_Loop l) = M_Loop $ f $ map (onLoops f) l
+onLoops _ x = x
 
 [mergeImm] Opt List MIR 1 where
 	optIR list = untilFix performOpt list where
@@ -446,11 +454,33 @@ untilFix f l = do
 		performOpt (h::t) = h :: performOpt t
 		performOpt [] = []
 
+[unrollLoops] Opt List MIR 1 where
+	optIR list = performOpt list where
+		mutatesTape : MIR -> Bool
+		mutatesTape (M_Add _) = True
+		mutatesTape (M_Set _) = True
+		mutatesTape (M_MulAddOff _ _) = True
+		mutatesTape (M_Input) = True
+		mutatesTape (M_Loop l) = any mutatesTape l
+		mutatesTape (M_FixedLoop l) = any mutatesTape l
+		mutatesTape _ = False
+
+		unroll : List MIR -> List MIR
+		unroll l = if (length l) > 200 || any mutatesTape l
+			then l
+			else l ++ l
+
+		performOpt : OptPass MIR
+		performOpt l = map (onLoops unroll) l
+
+
+
+
 emitterMIR : Bits64 -> List MIR -> List Bits8
 emitterMIR memAddr list = 
 		case runJit (emitter list) of
 			Left err => []
-			Right jit => trace (show $ length $ mach jit) mach $ record { 
+			Right jit => mach $ record { 
 				mach = (([0x48,0xB8] ++ (b64ToBytes memAddr)) ++ (mach jit) ++ [0xC3]),
 				memoff $= (+10)
 			} jit
