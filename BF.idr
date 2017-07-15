@@ -587,73 +587,11 @@ mutual
 	toBF : List MIR -> String
 	toBF l = concat $ map mirAsBF l
 
-{-record LLIR_Interpreter (m:Type -> Type) : Type* where
-	constructor MkLLInterpreter
-	tapeLength : Nat
-	steps : Nat
-	gas : Nat
-	tape : InfTape Bits8
-	tapeHeadPos : Integer
-	tapeHeadPosMax, tapeHeadPosMin : Integer
-	backtrackCount : Nat
-	programTape : FinTape Z (pred tapeLength) LLIR
-	ioInput : m Char
-	ioOutput : List Char
-
-jLoopClose : LLIR_Interpreter -> LLIR_Interpreter
-jLoopClose interpreter = jLoopClose' interpreter (backtrackCount interpreter) where
-	jLoopClose' : LLIR_Interpreter -> Nat -> LLIR_Interpreter
-	jLoopClose' interpreter initialScope = case cursor (programTape interpreter) of
-		LL_CloseLoop => case backtrackCount interpreter of
-			initialScope => record { programTape $= tapeRight } interpreter
-			_ => jLoopClose' (record { backtrackCount $= pred, programTape $= tapeRight } interpreter) initialScope
-		LL_OpenLoop => jLoopClose' (record { backtrackCount $= S, programTape $= tapeRight } interpreter) initialScope
-		_ => jLoopClose' (record { programTape $= tapeRight } interpreter) initialScope
-
-Interpreter (List LLIR) (LLIR_Interpreter IO) (IO ()) where
-	initial instrs = MkLLInterpreter (length instrs) Z 100000000 [] Z
-		(FinTape [] (head instrs) (fromList $ reverse $ tail instrs)) (pure ()) []
-	step interpreter = ?hmm --do
-		let tapeOffset = the (Integer, InfTape Bits8 -> InfTape Bits8) $ 
-			case cursor (programTape interpreter) of
-				LL_Left => (-1, infTapeLeft)
-				LL_Right => (1, infTapeRight)
-				_ => (0, id)
-		let pos' = tapeHeadPos interpreter + (first tapeOffset)
-		let dBacktrack = case cursor (programTape interpreter) of
-			LL_OpenLoop => -1
-			LL_CloseLoop => 1
-			_ => 0
-
-
-		record {
-			steps $= S
-			gas $= pred
-			tape $= second tapeOffset
-			tapeHeadPos $= \tapeHeadPos 
-			tapeHeadPosMin $= min pos'
-			tapeHeadPosMax $= max pos'
-			backtrackCount $= dBacktrack
-		} interpreter
-
-		interpreter
-		|> record { steps $= S, gas $= pred }
-		|> case cursor (programTape interpreter) of
-			LL_Left =>  record { tapeHeadPos $= (- 1) }
-					|>	\i => record { tapeHeadPosMin $= min (tapeHeadPos i) } i
-					|>	record {	tape $= infTapeLeft,
-									programTape $= tapeRight }
-			LL_Right => record { tapeHeadPos $= (+ 1) }
-					|>	\i => record { tapeHeadPosMax $= max (tapeHeadPos i) } i
-					|>	record {	tape $= infTapeRight,
-									programTape $= tapeRight }
-			LL_Inc =>	record { 	tape $= updateCursor (prim__addB8 1) }
-			LL_Dec => 	record { 	tape $= updateCursor (prim__subB8 1) }
-			LL_OpenLoop => record {}
-			LL_Input => record {	tape $= updateCursor ()}
-
-	-}
-
+mkOpt : Int -> (List MIR -> List MIR)
+mkOpt 0 = id
+mkOpt 1 = optIR @{removeNops} . optIR @{fixLoops} . optIR @{mergeImm}
+mkOpt 2 = untilFix (mkOpt 1) . optIR @{maddifyLoops} . optIR @{reorderFixedLoops} . untilFix (mkOpt 1)
+mkOpt _ = id
 
 optPassMIRFor : List String -> (List MIR -> List MIR)
 optPassMIRFor list = mkOpt optLevel where
@@ -661,12 +599,8 @@ optPassMIRFor list = mkOpt optLevel where
 	optLevel' = do
 		opt <- select list
 		case (unpack opt) of
-			with List ('o'::'='::str) => pure $ the Int $ cast (pack str)
+			with List ('O'::'='::str) => pure $ the Int $ cast (pack str)
 			_ => raise 0
 	optLevel : Int
 	optLevel = fromMaybe 0 $ the (Maybe Int) (run optLevel')
-	mkOpt : Int -> (List MIR -> List MIR)
-	mkOpt 0 = id
-	mkOpt 1 = optIR @{removeNops} . optIR @{fixLoops} . optIR @{mergeImm}
-	mkOpt 2 = untilFix (mkOpt 1) . optIR @{maddifyLoops} . optIR @{reorderFixedLoops} . untilFix (mkOpt 1)
-	mkOpt _ = id
+	
