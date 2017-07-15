@@ -95,9 +95,17 @@ parseOpts l = parseOpts' (map unpack l) ([],[]) where
 
 helpMessage : String
 helpMessage = "BFJIT - Interpret a BF program\nFormat:\n\n" ++
-	"    bjfit [--o=n] filename*\n" ++
-	"    --o=   JIT Optimisation level\n" ++
-	"           Supported optimisation levels: [0, 1, 2]"
+	"    bjfit inputFile\n" ++
+	"    -On           JIT Optimisation level n\n" ++
+	"                  Supported optimisation levels: [0, 1, 2]\n" ++
+	"    -t n          Tape Size - default value of 30,000\n" ++
+	"    -o fileName   Output file destination\n" ++
+	"                  Only used for compilation\n" ++
+	"    -c            Compile to ELF instead of running\n" ++
+	"    --dry-run     JIT compile, but don't run, the code\n" ++
+	"    --show-llir   Print out the low-level IR after optimisations\n" ++
+	"    --show-mir    Print out the mid-level IR after optimisations\n" ++
+	"    -h, --help    Display this help message"
 
 record RunOptions where
 	constructor RunOpts
@@ -305,21 +313,6 @@ runCompile runOpts fileContents = do
 	--Strings are null-unfriendly in Idris, so use a buffer instead
 	elfBuf <- calloc elfLength
 
-	--write to file
-	{-lift $ case outputFileName runOpts of
-		Just filename => putStrLn ""
-			case (lift $ performIO $ the (IO $ Either String ()) $ do
-				Right (FHandle handle) <- fopen fileName "wb" | Left err => Left err
-				(foreign FFI_C "fwrite" (Ptr -> Bits64 -> Bits64 -> Ptr -> IO ()) 
-					elfBuf 1 elfLength handle)
-				closeFile (FHandle handle)) of
-				Left err => putStrLn err
-				Right () => pure ()
-		Nothing => putStrLn "Need an output file name"
-	-}
-	{-case outputFileName runOpts of
-		Just fname => lift $ writeToFile fname elfBuf elfLength
-		Nothing => lift $ the (Eff () [IOEFF (), MALLOC Ptr]) (pure ())-}
 	efor_ {b=()} (zip (the (List Int) [0..elfLength]) elfBin) $ \(off, byte) => 
 		lift $ performIO $ poke I8 (CPt elfBuf off) byte
 	lift $ maybeWriteToFile (outputFileName runOpts) elfBuf (prim__zextInt_B64 elfLength)
@@ -337,8 +330,6 @@ emain = with Effect.File do
 		(prog::args) => do
 			let runOpts = parseRunOptsOver args defaultRunOpts
 			
-			lift $ putStrLn $ show runOpts
-
 			if helpWanted runOpts
 				then putStrLn helpMessage
 				else pure ()
