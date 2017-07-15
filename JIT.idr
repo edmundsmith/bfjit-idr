@@ -99,25 +99,69 @@ helpMessage = "BFJIT - Interpret a BF program\nFormat:\n\n" ++
 	"    --o=   JIT Optimisation level\n" ++
 	"           Supported optimisation levels: [0, 1, 2]"
 
-record MakeElf where
-	constructor MakeElfCommand
+record RunOptions where
+	constructor RunOpts
 	tapeSize : Int
 	mach : List Bits8
+	helpWanted : Bool
+	inputFileName : Maybe String
+	outputFileName : Maybe String
+	shouldRun : Bool
+	shouldCompile : Bool
+	optLevel : Int
+	showLLIR : Bool
+	showMIR : Bool
+
+parseRunOptsOver : List String -> RunOptions -> RunOptions
+parseRunOptsOver options = 
+	case options of
+		("-O0"::xs) => (parseRunOptsOver xs) . record { optLevel = 0 }
+		("-O1"::xs) => (parseRunOptsOver xs) . record { optLevel = 1 }
+		("-O2"::xs) => (parseRunOptsOver xs) . record { optLevel = 2 }
+		("-O3"::xs) => (parseRunOptsOver xs) . record { optLevel = 3 }
+		("-O"::x::xs) => (parseRunOptsOver xs) . record { optLevel = the Int $ cast x }
+		("-t"::x::xs) => (parseRunOptsOver xs) . record { tapeSize = the Int $ cast x }
+		("-h"::xs) => (parseRunOptsOver xs) . record { helpWanted = True }
+		("--help"::xs) => (parseRunOptsOver xs) . record { helpWanted = True }
+		("-o"::x::xs) => (parseRunOptsOver xs) . record { outputFileName = Just x }
+		("-c"::xs) => (parseRunOptsOver xs) . record { shouldCompile = True, shouldRun = False }
+		("--dry-run"::xs) => (parseRunOptsOver xs) . record { shouldRun = False }
+		("--show-llir"::xs) => (parseRunOptsOver xs) . record { showLLIR = True }
+		("--show-mir"::xs) => (parseRunOptsOver xs) . record { showMIR = True }
+		(x::xs) => (parseRunOptsOver xs) . record { inputFileName = Just x }
+		_ => id
+
+defaultRunOpts : RunOptions
+defaultRunOpts = RunOpts 30000 [] False Nothing Nothing True False 0 False False
+
+Show RunOptions where 
+	show (RunOpts tapeSize mach helpWanted inputFileName outputFileName shouldRun shouldCompile optLevel showLLIR showMIR) = 
+		"RunOptions {" ++ 
+			" tapeSize = " ++ show tapeSize ++
+			", mach = " ++ show mach ++
+			", helpWanted = " ++ show helpWanted ++
+			", inputFileName = " ++ show inputFileName ++
+			", outputFileName = " ++ show outputFileName ++
+			", shouldRun = " ++ show shouldRun ++
+			", shouldCompile = " ++ show shouldCompile ++
+			", optLevel = " ++ show optLevel ++
+			", showLLIR = " ++ show showLLIR ++
+			", showMIR = " ++ show showMIR ++ " }"
 
 
-makeElfFromJit : MakeElf -> List Bits8 -> List Bits8
+makeElfFromJit : RunOptions -> List Bits8 -> List Bits8
 makeElfFromJit options mach = with Prelude.List do
 	
 	let mach = drop 10 mach --Skip the initial hardcoded 'mov rax, lit64' prologue
 	--case isLTE 1 (length mach1) of
 		--Yes prf => do
-	let amount = case (length mach) of (S n) => n; Z => Z
-	let mach = take amount mach --Drop final ret epilogue
+	let mach = take (case (length mach) of (S n) => n; Z => Z) mach --Drop final ret epilogue
 
 	let prologue = the (List Bits8) [ --Establish buffer addr on rax
 			0x48,0x31,0xFF, --xor rdi, rdi //rdi=0
-			0xBE,0x30,0x75,0x00,0x00, --mov rsi, 30000
-			0xBA,0x03,0x00,0x00,0x00, --mov rdx, 3 (R|W)
+			0xBE
+		] ++ (reverse $ b32ToBytes $ prim__zextInt_B32 $ tapeSize options) ++ --mov rsi, (tapeSize options)
+			[0xBA,0x03,0x00,0x00,0x00, --mov rdx, 3 (R|W)
 			0x41,0xBA,0x22,0x00,0x00,0x00, --mov r10, 0x22 (ANONYMOUS|PRIVATE)
 			0x49,0xC7,0xC0,0xFF,0xFF,0xFF,0xFF, --mov r8, (-1) //fd
 			0x41,0xB9,0x00,0x00,0x00,0x00, --mov r9, 0 //offset
@@ -148,12 +192,12 @@ makeElfFromJit options mach = with Prelude.List do
 			0x02, 0x00, --e_type is executable, little endian
 			0x3E, 0x00, --e_machine - ISA is x64
 			0x01, 0x00, 0x00, 0x00, --Version, again is 1
-			            --v Post-virtual-setup pointer, not raw file offset
-			0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, -- 8 byte offset for program start
+						--v Post-virtual-setup pointer, not raw file offset
+			0x78, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, -- 8 byte offset for program start
 			--0x20:
 			0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, --program header table offset
 			-- (immediately follows elf table)
-			0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, -- 8 byte offset for section header table start
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, -- 8 byte offset for section header table start
 			--0x30:
 			0x00, 0x00, 0x00, 0x00, -- Flags (not defined for linux)
 			0x40, 0x00, --Total size of this header (64 bytes on 64 bit, 52 on 32 bit)
@@ -183,97 +227,136 @@ makeElfFromJit options mach = with Prelude.List do
 			--MEMSIZE, --8 byte memory space taken up
 			--0x30:
 			[0,0,0x20,0,0,0,0,0] --byte alignment
-	{-let shstrtabSectHeader = the (List bits8) [
-		--0x00:
-		0x00,0x00,0x00,0x00, --Name index in shstrtab
-		0x03,0x00,0x00,0x00, --Type is SHT_STRTAB
+	
+	
+	elfHeader ++ progHeader ++ prologue ++ mach ++ epilogue
 
-	]-}
-	let sectionHeader = the (List Bits8) [
-			--0x00:
-			0,0,0,0, -- Section name index in shstrtab
-			0,0,0,0, -- Null header
-			0,0,0,0,0,0,0,0, -- Section header flags
-			--0x10:
-			0,0,0,0,0,0,0,0, -- Virtual address of section if loaded
-			0x78,0,0,0,0,0,0,0, -- Offset of section in image
-			--0x20:
-			0,0,0,0,0,0,0,0, -- Size of the section
-			0,0,0,0, -- sh-Link
-			0,0,0,0, -- sh_info
-			--0x30:
-			0x8,0,0,0,0,0,0,0, -- Alignment of the section
-			0,0,0,0,0,0,0,0 -- sh_entsize
-			--0x40:
-			]
+compileBF : RunOptions -> String -> Effects.SimpleEff.Eff (List MIR) [STDIO]
+compileBF runOpts fileContents = do
+	let llir = parseLLIR fileContents
+
+	if showLLIR runOpts
+		then putStrLn (show llir)
+		else pure ()
+	
+	let mir = elevateLLIR llir
+	let mir = (mkOpt (optLevel runOpts) mir)
+
+	if showMIR runOpts
+		then putStrLn (show mir)
+		else pure ()
+
+	pure mir
+
+runJit : RunOptions -> String -> Effects.SimpleEff.Eff () [STDIO, MMAP, MALLOC (), IOEFF ()]
+runJit runOpts fileContents = do
+
+	tapePtr <- calloc (tapeSize runOpts)
+						
+	let tapeLoc = bytesToB64 $ reverse $ b64ToBytes (unsafePerformIO $ (foreign FFI_C "labs" (Ptr -> IO Bits64) tapePtr))
+
+	mir <- compileBF runOpts fileContents
+
+	let readyJit = emitterMIR tapeLoc mir
+	let jitLen = toIntNat $ length readyJit
+	
+	jitBuf <- mmap_exe (ARRAY jitLen I8)
+
+	--putStrLn "Writing bytes"
+	efor_ {b=()} (zip (the (List Int) [0..jitLen]) readyJit) $ \(off, byte) => 
+		lift $ performIO $ poke I8 (CPt jitBuf off) byte
 
 	
-	elfHeader ++ progHeader ++ sectionHeader ++ prologue ++ mach ++ epilogue
-
-
+	--efor_ {b=()} (makeElfFromJit (MakeElfCommand 0 readyJit) readyJit) $ \byte =>
+	--	lift $ performIO $ do foreign FFI_C "printf" (String -> Bits8 -> IO Int) "%c" byte; pure ()
 	
+	lift $ performIO $ do run_int_int_ptr jitBuf 0; pure ()
+
+	_ <- munmap jitBuf (prim__zextInt_B64 jitLen)
+	free tapePtr
+
+	pure ()
+
+writeToFile : String -> Ptr -> Bits64 -> Effects.SimpleEff.Eff () [IOEFF (), MALLOC Ptr]
+writeToFile fname buf len = performIO $ do
+	Right (FHandle handle) <- fopen fname "wb" | Left err => pure ()
+	(foreign FFI_C "fwrite" (Ptr -> Bits64 -> Bits64 -> Ptr -> IO ()) 
+		buf 1 len handle)
+	closeFile (FHandle handle)
+
+maybeWriteToFile : Maybe String -> Ptr -> Bits64 -> Effects.SimpleEff.Eff () [IOEFF (), MALLOC Ptr]
+maybeWriteToFile (Just str) buf len = writeToFile str buf len
+maybeWriteToFile Nothing _ _  = pure ()
+
+runCompile : RunOptions -> String -> Effects.SimpleEff.Eff () [STDIO, FILE (), IOEFF (), MALLOC ()]
+runCompile runOpts fileContents = do
+	
+	mir <- compileBF runOpts fileContents
+	
+	let readyBin = emitterMIR 0 mir
+	let elfBin = makeElfFromJit defaultRunOpts readyBin
+	lift $ with Prelude.Strings do
+		putStrLn $ "Compiling " ++ show (map {f=List} (prim__intToChar . prim__zextB8_Int) elfBin)
+		putStrLn $ " to " ++ (pack (map (prim__intToChar . prim__zextB8_Int) elfBin))
+		
+
+	let elfL = map (prim__intToChar . prim__zextB8_Int) elfBin
+	let elfLength = toIntNat $ Prelude.List.length elfL
+	--Strings are null-unfriendly in Idris, so use a buffer instead
+	elfBuf <- calloc elfLength
+
+	--write to file
+	{-lift $ case outputFileName runOpts of
+		Just filename => putStrLn ""
+			case (lift $ performIO $ the (IO $ Either String ()) $ do
+				Right (FHandle handle) <- fopen fileName "wb" | Left err => Left err
+				(foreign FFI_C "fwrite" (Ptr -> Bits64 -> Bits64 -> Ptr -> IO ()) 
+					elfBuf 1 elfLength handle)
+				closeFile (FHandle handle)) of
+				Left err => putStrLn err
+				Right () => pure ()
+		Nothing => putStrLn "Need an output file name"
+	-}
+	{-case outputFileName runOpts of
+		Just fname => lift $ writeToFile fname elfBuf elfLength
+		Nothing => lift $ the (Eff () [IOEFF (), MALLOC Ptr]) (pure ())-}
+	efor_ {b=()} (zip (the (List Int) [0..elfLength]) elfBin) $ \(off, byte) => 
+		lift $ performIO $ poke I8 (CPt elfBuf off) byte
+	lift $ maybeWriteToFile (outputFileName runOpts) elfBuf (prim__zextInt_B64 elfLength)
+
+	free elfBuf
+	pure ()
 
 printHelpMessage : List String -> Eff () [STDIO]
 printHelpMessage opts = if elem "help" opts then putStrLn helpMessage else pure ()
 
 emain : Effects.SimpleEff.Eff () [SYSTEM, STDIO, FILE (), MMAP, MALLOC (), IOEFF ()]
-emain = 
+emain = with Effect.File do
 	case !getArgs of
 		[] => putStrLn "Impossible: empty arg list"
 		(prog::args) => do
-			let (opts, files) = parseOpts args
-			printHelpMessage opts
-			let irOpt = optPassMIRFor opts
-			--putStrLn $ "Opts: " ++ show opts
-			efor_ {b=()} files $ \file => with Effect.StdIO with Effect.File do --'
-				--putStrLn $ "Running " ++ file
-				case !(readFile file) of 
-					Result fileContents => do
-						--putStrLn "Read:"
-						--putStrLn fileContents
+			let runOpts = parseRunOptsOver args defaultRunOpts
+			
+			lift $ putStrLn $ show runOpts
 
-						tapePtr <- calloc 4000
-						
-						let tapeLoc = bytesToB64 $ reverse $ b64ToBytes (unsafePerformIO $ (foreign FFI_C "labs" (Ptr -> IO Bits64) tapePtr))
+			if helpWanted runOpts
+				then putStrLn helpMessage
+				else pure ()
 
-						let llir = parseLLIR fileContents
+			case inputFileName runOpts of
+				Nothing => putStrLn "Need an input file name"
+				Just file => do
+					case !(readFile file) of 
+						Result fileContents => do
+							if shouldRun runOpts
+								then runJit runOpts fileContents
+								else pure ()
+							if shouldCompile runOpts
+								then runCompile runOpts fileContents
+								else pure ()
+							pure ()
 
-						let mir = elevateLLIR llir
-
-						{-let mir = optIR @{fixLoops} $ optIR @{mergeImm} mir
-						let mir = optIR @{reorderFixedLoops} mir
-						let mir = optIR @{removeNops} $ optIR @{mergeImm} $ optIR @{maddifyLoops} $ mir
-						-}
-
-						let mir = (optPassMIRFor opts mir)
-						--putStrLn $ show mir
-						let readyJit = emitterMIR tapeLoc mir
-						let jitLen = toIntNat $ length readyJit
-						
-						jitBuf <- mmap_exe (ARRAY jitLen I8)
-
-						--putStrLn "Writing bytes"
-						efor_ {b=()} (zip (the (List Int) [0..jitLen]) readyJit) $ \(off, byte) => 
-							lift $ performIO $ poke I8 (CPt jitBuf off) byte
-
-						--putStrLn "Begin elf:"
-
-						efor_ {b=()} (makeElfFromJit (MakeElfCommand 0 readyJit) readyJit) $ \byte =>
-							lift $ performIO $ do foreign FFI_C "printf" (String -> Bits8 -> IO Int) "%c" byte; pure ()
-						--lift $ performIO $ do _ <- foreign FFI_C "printf" (String -> Ptr -> IO Int) "%s\n" jitBuf; pure ()
-
-						--putStrLn $ show mir
-						--putStrLn "---------"
-										
-						--putStrLn "\nMIR:"
-						--for_ readyMIRJit (Prelude.Interactive.putStr . show)
-						--putStrLn "Jit prepared!"
-						--performIO $ do _ <- run_int_int_ptr jitBuf 0; pure ()
-
-						_ <- munmap jitBuf (prim__zextInt_B64 jitLen)
-						free tapePtr
-
-					err => putStrLn ("Unexpected error with: " ++ file)
+						err => putStrLn ("Unexpected error with: " ++ file)
 
 io_emain : IO ()
 io_emain = run emain
